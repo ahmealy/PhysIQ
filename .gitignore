@@ -5,7 +5,6 @@ checkpoints/
 .vscode/
 *.log
 *.pth
-data/
 log/
 *.npy
 *.pkl
@@ -13,7 +12,18 @@ log/
 *.whl
 *.tar.gz
 *.zip
-*.pyc
-*.log
 runs/
 __pycache__/
+
+# Virtual environments
+venv/
+venv_tf/
+venv_gpu/
+
+# Session/personal docs
+CONTEXT.md
+DEEP_LEARNING_TUTORIAL.md
+OVERVIEW.md
+
+# Dataset metadata
+meta.json

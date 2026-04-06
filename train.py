@@ -15,6 +15,7 @@ dataset_dir = "data"
 batch_size = 20
 noise_std = 2e-2
 num_epochs = 100
+early_stopping_patience = 10  # stop if no improvement for this many epochs
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 checkpoint_dir = "checkpoints"
@@ -36,6 +37,19 @@ transformer = T.Compose([
     T.Cartesian(norm=False),
     T.Distance(norm=False)
 ])
+
+def load_checkpoint(checkpoint_path, model, optimizer, device):
+    """Resume training from a saved checkpoint."""
+    if not os.path.exists(checkpoint_path):
+        print('No checkpoint found, starting from scratch.')
+        return 1, float('inf')
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt['model_state_dict'])
+    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    start_epoch = ckpt['epoch'] + 1
+    best_valid_loss = ckpt['valid_loss']
+    print(f'Resumed from epoch {ckpt["epoch"]} with valid loss {best_valid_loss:.2e}')
+    return start_epoch, best_valid_loss
 
 def train_one_epoch(model: Simulator, dataloader, optimizer, transformer, device, noise_std):
     model.train()
@@ -94,10 +108,13 @@ if __name__ == '__main__':
 
     simulator.to(device)
 
-    best_valid_loss = float('inf')
-    best_epoch = -1
+    # Resume from checkpoint if it exists
+    checkpoint_path = os.path.join(checkpoint_dir, "best_model.pth")
+    start_epoch, best_valid_loss = load_checkpoint(checkpoint_path, simulator, optimizer, device)
+    best_epoch = start_epoch - 1
+    epochs_no_improve = 0
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
 
         train_loss = train_one_epoch(simulator, train_loader, optimizer, transformer, device, noise_std)
         valid_loss = evaluate(simulator, valid_loader, transformer, device)
@@ -112,7 +129,7 @@ if __name__ == '__main__':
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
             best_epoch = epoch
-            checkpoint_path = os.path.join(checkpoint_dir, "best_model.pth")
+            epochs_no_improve = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': simulator.state_dict(),
@@ -120,6 +137,12 @@ if __name__ == '__main__':
                 'valid_loss': valid_loss,
             }, checkpoint_path)
             print(f"  -> New best model saved at epoch {epoch} with valid loss {valid_loss:.2e}")
+        else:
+            epochs_no_improve += 1
+            print(f"  -> No improvement for {epochs_no_improve}/{early_stopping_patience} epochs")
+            if epochs_no_improve >= early_stopping_patience:
+                print(f"\nEarly stopping triggered. No improvement for {early_stopping_patience} epochs.")
+                break
 
     writer.close()
     print(f"\nTraining finished. Best model at epoch {best_epoch} with validation loss {best_valid_loss:.2e}")

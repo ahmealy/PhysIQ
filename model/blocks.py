@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch_scatter import scatter_add
+from torch_geometric.utils import scatter
 from torch_geometric.data import Data
 
 
@@ -47,7 +47,7 @@ class NodeBlock(nn.Module):
         
         _, receivers_idx = graph.edge_index
         num_nodes = graph.num_nodes
-        agg_received_edges = scatter_add(edge_attr, receivers_idx, dim=0, dim_size=num_nodes)
+        agg_received_edges = scatter(edge_attr, receivers_idx, dim=0, dim_size=num_nodes, reduce='sum')
 
         nodes_to_collect.append(graph.x)
         nodes_to_collect.append(agg_received_edges)

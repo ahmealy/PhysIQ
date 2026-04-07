@@ -26,6 +26,8 @@ pip install -r requirements.txt
 
 > 💡 **Note**: TensorFlow < 1.15.0 is required only for parsing the original TFRecord datasets.
 
+A `pyproject.toml` is also provided for tool configs (ruff, mypy, pytest) and project metadata.
+
 ---
 
 ## 🚀 Quick Start
@@ -51,6 +53,24 @@ python parse_tfrecord.py
 ```bash
 python train.py
 ```
+
+The UI writes a JSON config for `train.py`. You can also pass one manually:
+```bash
+python train.py --config runs/my_config.json
+```
+
+Config keys (all optional, defaults shown):
+```json
+{
+  "num_epochs": 100,
+  "batch_size": 20,
+  "lr": 1e-4,
+  "noise_std": 0.02,
+  "early_stopping_patience": 10,
+  "message_passing_num": 15
+}
+```
+
 FOR MULTI-GPU TRAINING:
 
 ```bash
@@ -62,13 +82,81 @@ torchrun --nproc_per_node=$NGPUS train_ddp.py --dataset_dir data
 Generate long-horizon predictions and render videos:
 
 ```bash
-python rollout.py          # saves results to ./results/
+python rollout.py          # saves results to ./result/
 python render_results.py   # generates videos in ./videos/
 ```
 
+## 🌐 Web UI
+
+The project includes a **React + FastAPI** full-stack dashboard for training, inference, and result visualization.
+
+### Architecture
+
+```
+Browser (localhost:5173)
+  └── Vite dev server  →  proxy /api/*  →  FastAPI backend (port 8000)
+```
+
+### Startup
+
+**Terminal 1 — FastAPI backend:**
+```bash
+# From the repo root — activate the venv first
+source venv/bin/activate
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+> Use `python -m uvicorn` (not just `uvicorn`) to ensure it runs inside the venv
+> where all dependencies (torch, fastapi, scipy, etc.) are installed.
+> Full interactive API docs at: http://localhost:8000/docs
+
+**Terminal 2 — React frontend:**
+```bash
+cd app
+npm install
+npm run dev   # opens http://localhost:5173
+```
+
+All `/api/*` calls from the browser are proxied by Vite directly to FastAPI at port 8000.
+
+### Available Pages
+
+| Page | Route | Description |
+|------|-------|-------------|
+| Home / Dashboard | `/` | Status overview, GPU info, quick-start |
+| Training | `/train` | Configure + monitor training with live loss curves |
+| Predict | `/predict` | Run autoregressive rollouts, GPU performance panel |
+| Visualize | `/visualize?file=X` | 3-panel mesh viewer + RMSE + Diagnostics + Physics tabs |
+| Pipeline | `/pipeline` | End-to-end workflow DAG with live status |
+| Experiments | `/experiments` | Compare RMSE curves across saved rollouts |
+| Dataset Studio | `/dataset` | Dataset statistics, node count histogram, outlier flagging |
+
 ---
 
-## 🎥 Demos
+### Remote GPU Training
+
+To offload training to a remote GPU machine over SSH, configure it in the UI under **Training → Remote GPU**, or save a config manually:
+
+```bash
+cat > runs/remote_gpu.json <<EOF
+{
+  "host": "your-gpu-machine.example.com",
+  "port": 22,
+  "user": "ahmealy",
+  "venv_python": "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python",
+  "enabled": true
+}
+EOF
+```
+
+Requirements:
+- SSH key auth set up (`ssh-copy-id user@host`)
+- Shared filesystem — the repo root must be accessible at the same path on both machines (e.g. NFS mount)
+- The remote venv must have all dependencies installed
+
+When enabled, **Start Training** in the UI will run `train.py` on the remote machine. Logs stream back over SSH in real time.
+
+
 
 ### Results on DeepMind’s `cylinder_flow`:
 | Demo 0 | Demo 1 |
@@ -81,13 +169,6 @@ python render_results.py   # generates videos in ./videos/
 | ![Demo 2](videos/2.gif) | ![Demo 3](videos/3.gif) |
 
 > ✅ The model generalizes well—even to unseen flow regimes and mesh configurations!
-
----
-
-## 📬 Contact
-
-Have questions, suggestions, or want to collaborate?  
-📧 Reach out: [jianglx@whu.edu.cn](mailto:jianglx@whu.edu.cn)
 
 ---
 

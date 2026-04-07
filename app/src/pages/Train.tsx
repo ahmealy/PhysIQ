@@ -1,0 +1,521 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Server, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+export const Train: React.FC = () => {
+  const [domains, setDomains] = useState<Record<string, any>>({});
+  const [config, setConfig] = useState({
+    domain: 'cylinder_flow',
+    epochs: 100,
+    batch_size: 20,
+    lr: 0.0001,
+    noise_std: 0.02,
+    early_stopping_patience: 10,
+    message_passing_steps: 15,
+  });
+
+  const [isRunning, setIsRunning] = useState(false);
+  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [epochs, setEpochs] = useState<any[]>([]);
+  const [bestEpoch, setBestEpoch] = useState<any>(null);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [arch, setArch] = useState('GNS');
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  // Remote GPU config
+  const [remote, setRemote] = useState({ host: '', port: 22, user: 'ahmealy', venv_python: '/home/ahmealy/.pyenv/versions/venv_gpu/bin/python', enabled: false });
+  const [remoteEnabled, setRemoteEnabled] = useState(false);
+  const [testStatus, setTestStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  // Tick elapsed timer while running
+  useEffect(() => {
+    if (!isRunning || startTime === null) return;
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - startTime) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [isRunning, startTime]);
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logLines]);
+
+  const startStreaming = useCallback(() => {
+    // No-op if already connected
+    if (eventSourceRef.current && eventSourceRef.current.readyState !== EventSource.CLOSED) return;
+    if (eventSourceRef.current) eventSourceRef.current.close();
+    const es = new EventSource('/api/train/stream');
+    eventSourceRef.current = es;
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'epoch') {
+        const line = `[Epoch ${data.epoch}] train=${data.train_loss.toExponential(3)}  valid=${data.valid_loss.toExponential(3)}`;
+        setEpochs(prev => [...prev, data]);
+        setLogLines(prev => [...prev.slice(-200), line]);  // keep last 200 lines
+      } else if (data.type === 'best') {
+        setLogLines(prev => [...prev, `  ✓ New best checkpoint — epoch ${data.epoch}, valid=${data.valid_loss.toExponential(3)}`]);
+        setBestEpoch(data);
+      } else if (data.type === 'done') {
+        setLogLines(prev => [...prev, '--- Training complete ---']);
+        setIsRunning(false);
+        es.close();
+      } else if (data.type === 'error') {
+        setLogLines(prev => [...prev, `❌ Error: ${data.message}`]);
+        setIsRunning(false);
+        es.close();
+      }
+    };
+    es.onerror = () => {
+      setLogLines(prev => [...prev, '[stream disconnected]']);
+      setIsRunning(false);
+      es.close();
+    };
+  }, []);
+
+  // On mount: load domains + restore state from API
+  useEffect(() => {
+    // Use a single state update to avoid the flash where statusLoaded=true
+    // but isRunning is still false (shows "Start Training" for one render frame).
+    let cancelled = false;
+
+    // Fast path: /api/status already has training_running and is cheap/cached.
+    // Use it to set isRunning immediately so the button never flashes.
+    fetch('/api/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (cancelled || !d) return;
+        if (d.domains) setDomains(d.domains);
+        // Set isRunning from fast status endpoint before the full train/status loads
+        if (d.training_running) {
+          setIsRunning(true);
+          setStartTime(Date.now());
+          startStreaming();
+          setStatusLoaded(true);  // already know enough — show Stop button immediately
+        }
+      })
+      .catch(() => {});
+
+    // Load saved remote GPU config
+    fetch('/api/train/remote')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) { setRemote(d); setRemoteEnabled(!!d.enabled && !!d.host); }
+      }).catch(() => {});
+
+    // Full train status for epoch history and best checkpoint
+    fetch('/api/train/status')
+      .then(r => r.json())
+      .then(data => {
+        if (cancelled) return;
+        setEpochs(data.epochs || []);
+        if (data.best_epoch) setBestEpoch({ epoch: data.best_epoch, valid_loss: data.best_valid_loss });
+        // If fast path already set isRunning, don't overwrite — just update epochs.
+        // If fast path didn't fire yet, handle running state here.
+        if (data.running) {
+          setIsRunning(true);
+          setStartTime(prev => prev ?? Date.now());
+          startStreaming();
+        }
+        setStatusLoaded(true);
+      })
+      .catch(() => { if (!cancelled) setStatusLoaded(true); });
+
+    return () => {
+      cancelled = true;
+      eventSourceRef.current?.close();
+    };
+  }, [startStreaming]);
+
+  const handleStart = async () => {
+    const res = await fetch('/api/train/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    if (res.ok) {
+      setIsRunning(true);
+      setStartTime(Date.now());
+      setElapsed(0);
+      setLogLines(['--- Training started ---']);
+      startStreaming();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || 'Failed to start training');
+    }
+  };
+
+  const handleStop = async () => {
+    const res = await fetch('/api/train/stop', { method: 'POST' });
+    if (res.ok) {
+      setIsRunning(false);
+      setLogLines(prev => [...prev, '--- Stopped by user ---']);
+      eventSourceRef.current?.close();
+    }
+  };
+
+  const handleSaveRemote = async () => {
+    const cfg = { ...remote, enabled: remoteEnabled };
+    await fetch('/api/train/remote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    setTestStatus(null);
+  };
+
+  const handleTestRemote = async () => {
+    setTesting(true);
+    setTestStatus(null);
+    try {
+      const res = await fetch('/api/train/remote/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...remote, enabled: remoteEnabled }),
+      });
+      const d = await res.json();
+      setTestStatus(d);
+    } catch {
+      setTestStatus({ ok: false, message: 'Request failed — is the API server running?' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const lastEpoch = epochs[epochs.length - 1];
+  const fmtElapsed = (s: number) => `${String(Math.floor(s / 3600)).padStart(2,'0')}:${String(Math.floor((s % 3600) / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
+
+  return (
+    <div className="p-8 space-y-8 max-w-7xl mx-auto">
+      <header className="flex justify-between items-end">
+        <div>
+          <h2 className="text-3xl font-bold text-white tracking-tight">Model Training</h2>
+          <p className="text-slate-400 mt-2">Configure and monitor MeshGraphNets training</p>
+        </div>
+        <div className="flex gap-3">
+          {!statusLoaded ? (
+            <div className="px-6 py-2.5 bg-slate-800 text-slate-500 rounded-lg font-semibold flex items-center gap-2">
+              <div className="w-4 h-4 border-2 border-slate-600 border-t-slate-400 rounded-full animate-spin" />
+              Checking...
+            </div>
+          ) : isRunning ? (
+            <button
+              onClick={handleStop}
+              className="px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-red-900/20"
+            >
+              <Square className="w-4 h-4 fill-current" />
+              Stop Training
+            </button>
+          ) : (
+            <button
+              onClick={handleStart}
+              disabled={arch !== 'GNS'}
+              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
+            >
+              <Play className="w-4 h-4 fill-current" />
+              Start Training
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+        <aside className="space-y-6">
+          {/* Dataset / Domain selector */}
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80 flex items-center gap-2">
+              <Database className="w-4 h-4 text-slate-400" />
+              <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Dataset</h3>
+            </div>
+            <div className="p-6 space-y-3">
+              <select
+                value={config.domain}
+                onChange={(e) => setConfig({ ...config, domain: e.target.value })}
+                disabled={isRunning}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
+              >
+                {Object.keys(domains).length > 0
+                  ? Object.entries(domains).map(([key, d]: [string, any]) => (
+                    <option key={key} value={key} disabled={!d.available}>
+                      {d.label}{!d.available ? ' (coming soon)' : ''}
+                    </option>
+                  ))
+                  : <option value="cylinder_flow">Cylinder Flow (CFD)</option>
+                }
+              </select>
+              {domains[config.domain] && (
+                <p className="text-[10px] text-slate-500">{domains[config.domain].description}</p>
+              )}
+              {Object.values(domains).some((d: any) => !d.available) && (
+                <p className="text-[10px] text-slate-600 italic">Other domains are coming soon</p>
+              )}
+            </div>
+          </section>
+
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80">
+              <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Architecture</h3>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="space-y-2">
+                <select
+                  value={arch}
+                  onChange={(e) => setArch(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
+                >
+                  <option value="GNS">GNS (Graph Network)</option>
+                  <option value="TNS">TNS (Transformer)</option>
+                  <option value="SER">SER (Shape Encoding)</option>
+                </select>
+                {arch !== 'GNS' && (
+                  <div className="p-3 bg-blue-600/10 border border-blue-500/20 rounded-lg flex items-start gap-2">
+                    <Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                    <p className="text-[10px] text-blue-300">Architecture "{arch}" is currently in development. Training is disabled.</p>
+                  </div>
+                )}
+              </div>
+              <div className="overflow-hidden border border-slate-800 rounded-lg">
+                <table className="w-full text-[10px] text-left">
+                  <thead className="bg-slate-950 text-slate-500 uppercase font-bold">
+                    <tr>
+                      <th className="px-2 py-1.5">Model</th>
+                      <th className="px-2 py-1.5">Best For</th>
+                      <th className="px-2 py-1.5">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 text-slate-400">
+                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">GNS</td><td className="px-2 py-1.5">Transient CFD</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
+                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">TNS</td><td className="px-2 py-1.5">Global Physics</td><td className="px-2 py-1.5 text-slate-600">🔒 Soon</td></tr>
+                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">SER</td><td className="px-2 py-1.5">Steady-state</td><td className="px-2 py-1.5 text-slate-600">🔒 Soon</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80">
+              <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Hyperparameters</h3>
+            </div>
+            <div className="p-6 space-y-4">
+              <ParamInput label="Learning Rate" value={config.lr} onChange={(v) => setConfig({ ...config, lr: parseFloat(v) })} type="number" step="0.00001" />
+              <ParamInput label="Epochs" value={config.epochs} onChange={(v) => setConfig({ ...config, epochs: parseInt(v) })} type="number" />
+              <ParamInput label="Batch Size" value={config.batch_size} onChange={(v) => setConfig({ ...config, batch_size: parseInt(v) })} type="number" />
+              <ParamInput label="Noise Std" value={config.noise_std} onChange={(v) => setConfig({ ...config, noise_std: parseFloat(v) })} type="number" step="0.01" />
+              <ParamInput label="MP Steps" value={config.message_passing_steps} onChange={(v) => setConfig({ ...config, message_passing_steps: parseInt(v) })} type="number" />
+            </div>
+          </section>
+
+          {bestEpoch && (
+            <section className="bg-blue-600/10 border border-blue-500/20 rounded-2xl p-6 space-y-3">
+              <div className="flex items-center gap-2 text-blue-400">
+                <Target className="w-4 h-4" />
+                <span className="text-xs font-bold uppercase tracking-wider">Best Checkpoint</span>
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-white font-mono">{bestEpoch.valid_loss.toFixed(6)}</p>
+                <p className="text-xs text-blue-400/70">Epoch {bestEpoch.epoch}</p>
+              </div>
+            </section>
+          )}
+
+          {/* Remote GPU */}
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Server className="w-4 h-4 text-slate-400" />
+                <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Remote GPU</h3>
+              </div>
+              <button
+                onClick={() => { setRemoteEnabled(e => !e); setTestStatus(null); }}
+                className={`relative w-9 h-5 rounded-full transition-colors ${remoteEnabled ? 'bg-blue-600' : 'bg-slate-700'}`}
+              >
+                <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${remoteEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="space-y-2">
+                <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">SSH Host</label>
+                <input
+                  value={remote.host}
+                  onChange={e => setRemote(r => ({ ...r, host: e.target.value }))}
+                  placeholder="dvt-gpubig1.wv.mentorg.com"
+                  disabled={isRunning}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Port</label>
+                  <input
+                    type="number"
+                    value={remote.port}
+                    onChange={e => setRemote(r => ({ ...r, port: parseInt(e.target.value) || 22 }))}
+                    disabled={isRunning}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">User</label>
+                  <input
+                    value={remote.user}
+                    onChange={e => setRemote(r => ({ ...r, user: e.target.value }))}
+                    placeholder="ahmealy"
+                    disabled={isRunning}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Venv Python path</label>
+                <input
+                  value={remote.venv_python}
+                  onChange={e => setRemote(r => ({ ...r, venv_python: e.target.value }))}
+                  placeholder="/home/ahmealy/.pyenv/versions/venv_gpu/bin/python"
+                  disabled={isRunning}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 font-mono disabled:opacity-50"
+                />
+              </div>
+
+              {testStatus && (
+                <div className={`flex items-start gap-2 p-2.5 rounded-lg text-[11px] ${testStatus.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                  {testStatus.ok
+                    ? <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    : <XCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />}
+                  <span>{testStatus.message}</span>
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleTestRemote}
+                  disabled={testing || !remote.host || isRunning}
+                  className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5"
+                >
+                  {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Server className="w-3 h-3" />}
+                  Test
+                </button>
+                <button
+                  onClick={handleSaveRemote}
+                  disabled={isRunning}
+                  className="flex-1 py-2 bg-blue-600/20 hover:bg-blue-600/30 disabled:opacity-40 text-blue-400 border border-blue-500/20 rounded-lg text-xs font-medium transition-colors"
+                >
+                  Save
+                </button>
+              </div>
+              {remoteEnabled && remote.host && (
+                <p className="text-[10px] text-blue-400/70 text-center">
+                  Training will run on <span className="font-mono">{remote.host}:{remote.port}</span>
+                </p>
+              )}
+            </div>
+          </section>
+        </aside>
+
+        <main className="lg:col-span-3 space-y-6">
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 h-[360px] flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <TrendingDown className="w-5 h-5 text-slate-400" />
+                <h3 className="font-semibold text-white">Loss Curves</h3>
+              </div>
+              <div className="flex gap-4 text-xs">
+                <div className="flex items-center gap-2"><div className="w-3 h-3 bg-blue-500 rounded-sm" /><span className="text-slate-400">Train</span></div>
+                <div className="flex items-center gap-2"><div className="w-3 h-3 bg-green-500 rounded-sm" /><span className="text-slate-400">Valid</span></div>
+              </div>
+            </div>
+            <div className="flex-1 min-h-0">
+              {epochs.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-slate-600 text-sm">
+                  {isRunning ? 'Waiting for first epoch…' : 'No training data yet — start training to see loss curves'}
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={epochs}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                    <XAxis dataKey="epoch" stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} label={{ value: 'Epoch', position: 'insideBottom', offset: -5, fill: '#64748b', fontSize: 10 }} />
+                    <YAxis scale="log" domain={['auto', 'auto']} stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => v.toExponential(1)} />
+                    <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px' }} itemStyle={{ fontSize: '12px' }} />
+                    <Line type="monotone" dataKey="train_loss" stroke="#3b82f6" strokeWidth={2} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="valid_loss" stroke="#10b981" strokeWidth={2} dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </section>
+
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
+              <div className="w-10 h-10 bg-slate-950 rounded-lg flex items-center justify-center text-slate-400">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase text-slate-500 font-bold">Time Elapsed</p>
+                <p className="text-sm font-semibold text-slate-200 font-mono">
+                  {isRunning ? fmtElapsed(elapsed) : elapsed > 0 ? fmtElapsed(elapsed) : '—'}
+                </p>
+              </div>
+            </div>
+            <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
+              <div className="w-10 h-10 bg-slate-950 rounded-lg flex items-center justify-center text-slate-400">
+                <Info className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase text-slate-500 font-bold">Epochs Done</p>
+                <p className="text-sm font-semibold text-slate-200">{epochs.length > 0 ? `${epochs.length} / ${config.epochs}` : '—'}</p>
+              </div>
+            </div>
+            <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
+              <div className="w-10 h-10 bg-slate-950 rounded-lg flex items-center justify-center text-slate-400">
+                <Target className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase text-slate-500 font-bold">Current Valid Loss</p>
+                <p className="text-sm font-semibold text-slate-200 font-mono">
+                  {lastEpoch ? lastEpoch.valid_loss.toExponential(3) : '—'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Live Log */}
+          {(isRunning || logLines.length > 0) && (
+            <section className="bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-slate-800 flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Training Log</span>
+                {isRunning && <span className="ml-auto w-2 h-2 bg-green-500 rounded-full animate-pulse" />}
+              </div>
+              <div
+                ref={logRef}
+                className="p-4 h-40 overflow-y-auto font-mono text-[11px] text-slate-400 space-y-0.5"
+              >
+                {logLines.map((line, i) => (
+                  <div key={i} className={line.startsWith('  ✓') ? 'text-green-400' : line.startsWith('---') ? 'text-blue-400' : ''}>
+                    {line}
+                  </div>
+                ))}
+                {isRunning && <div className="text-slate-600 animate-pulse">▌</div>}
+              </div>
+            </section>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+};
+
+const ParamInput = ({ label, value, onChange, type = "text", step }: any) => (
+  <div className="space-y-1.5">
+    <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">{label}</label>
+    <input
+      type={type}
+      step={step}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
+    />
+  </div>
+);

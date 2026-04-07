@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Project metadata
+# ─────────────────────────────────────────────────────────────────────────────
+[project]
+name = "meshgraphnets-pytorch"
+version = "0.1.0"
+description = "Graph neural network physics simulation — MeshGraphNets in PyTorch"
+requires-python = ">=3.10"
+
+# Core dependencies — minimum versions that are known to work together.
+# torch / torch-geometric are NOT listed here because they require
+# platform-specific index URLs (--index-url / --find-links).
+# Install them separately first:
+#
+#   pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+#   pip install torch-geometric==2.7.0
+#
+# Then install the rest:
+#   pip install -e ".[dev]"
+dependencies = [
+    # Numerics
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "networkx>=3.0",
+
+    # Vision / utils
+    "Pillow>=10.0",
+    "opencv-python>=4.8",
+    "matplotlib>=3.7",
+    "tqdm>=4.65",
+    "packaging>=23.0",
+
+    # Training monitoring
+    "tensorboard>=2.14",
+
+    # API backend
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+    "starlette>=0.41",
+
+    # UI (Streamlit — legacy interface)
+    "streamlit>=1.36",
+    "plotly>=5.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",        # also needed for TestClient
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]   # pycodestyle + pyflakes + isort + pyupgrade
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "UP007",  # X | Y union syntax — keep Optional[] for clarity
+]
+
+[tool.ruff.lint.per-file-ignores]
+"train.py"      = ["E402"]   # top-level imports after sys.path manipulation
+"rollout.py"    = ["E402"]
+"api/**/*.py"   = ["B008"]   # FastAPI Depends() in default args
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true   # torch-geometric stubs not available
+warn_unused_ignores = true
+warn_return_any = false         # too noisy with torch tensors
+
+[tool.pytest.ini_options]
+testpaths   = ["tests"]
+asyncio_mode = "auto"
+addopts     = "-v --tb=short"
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["api*", "model*", "utils*", "dataset*"]
+exclude = ["venv*", "venv_tf*", "app*", "data*", "checkpoints*", "result*"]

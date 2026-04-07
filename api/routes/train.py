@@ -1,0 +1,357 @@
+"""
+/train/* endpoints — start, stop, status, SSE stream, SSH remote config.
+"""
+
+import json
+import asyncio
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+from typing import AsyncGenerator, Optional
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+import api.state as state
+
+router = APIRouter(prefix="/train")
+
+
+# ── Request models ────────────────────────────────────────────────────────────
+class TrainConfig(BaseModel):
+    domain:                   str   = "cylinder_flow"
+    epochs:                   int   = 100
+    batch_size:               int   = 20
+    lr:                       float = 1e-4
+    noise_std:                float = 0.02
+    early_stopping_patience:  int   = 10
+    message_passing_steps:    int   = 15
+
+
+class RemoteConfig(BaseModel):
+    host:        str            # e.g. dvt-gpubig1.wv.mentorg.com
+    port:        int   = 22
+    user:        str   = ""     # empty = use current username
+    venv_python: str   = "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python"
+    enabled:     bool  = True
+
+
+# ── SSH config persistence ─────────────────────────────────────────────────────
+_SSH_CFG_PATH = "runs/remote_gpu.json"
+
+def _load_remote_cfg() -> Optional[dict]:
+    if not os.path.exists(_SSH_CFG_PATH):
+        return None
+    try:
+        with open(_SSH_CFG_PATH) as f:
+            d = json.load(f)
+        if not d.get("enabled") or not d.get("host"):
+            return None
+        return d
+    except Exception:
+        return None
+
+def _save_remote_cfg(cfg: Optional[dict]) -> None:
+    os.makedirs("runs", exist_ok=True)
+    with open(_SSH_CFG_PATH, "w") as f:
+        json.dump(cfg or {}, f, indent=2)
+
+
+# ── SSH command builder ────────────────────────────────────────────────────────
+def _build_ssh_prefix(cfg: dict) -> list[str]:
+    """Return the ssh [...] prefix list for subprocess."""
+    user = cfg.get("user", "").strip()
+    host = cfg["host"].strip()
+    port = int(cfg.get("port", 22))
+    target = f"{user}@{host}" if user else host
+    return [
+        "ssh",
+        "-p", str(port),
+        "-o", "StrictHostKeyChecking=no",   # don't block on first-connect prompt
+        "-o", "BatchMode=yes",              # fail immediately if key auth not set up
+        "-o", "ConnectTimeout=10",
+        target,
+    ]
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _parse_log(log_path: str) -> list[dict]:
+    """Parse epoch lines from train.py stdout.
+    Format: 'Epoch N/M Train Loss: X.XXe-XX Valid Loss: X.XXe-XX'
+    """
+    epochs = []
+    if not os.path.exists(log_path):
+        return epochs
+    with open(log_path, "r") as f:
+        for line in f:
+            if line.startswith("Epoch ") and "Train Loss:" in line:
+                try:
+                    parts = line.split()
+                    ep = int(parts[1].split("/")[0])
+                    tl = float(parts[4])
+                    vl = float(parts[7])
+                    epochs.append({"epoch": ep, "train_loss": tl, "valid_loss": vl})
+                except (IndexError, ValueError):
+                    continue
+    return epochs
+
+
+def _friendly_error(log_path: str) -> str:
+    """Extract a human-readable error from a failed training log."""
+    default = "Training failed to start — check that dependencies are installed."
+    try:
+        with open(log_path, "r") as f:
+            lines = [l.rstrip() for l in f.readlines() if l.strip()]
+        for line in reversed(lines):
+            if "RuntimeError" in line or "Error:" in line or "CUDA" in line:
+                msg = line.strip()
+                if "can't allocate memory" in msg or "Cannot allocate memory" in msg:
+                    return "Out of memory (CPU RAM). Try reducing Batch Size (e.g. 4–8) or closing other applications."
+                if "CUDA out of memory" in msg:
+                    return "Out of GPU memory. Try reducing Batch Size or Message Passing Steps."
+                return msg
+        missing = next((l for l in lines if "No module named" in l), None)
+        if missing:
+            return f"Missing dependency: {missing.strip()}"
+    except Exception:
+        pass
+    return default
+
+
+# ── SSH config endpoints ───────────────────────────────────────────────────────
+@router.get("/remote")
+def get_remote():
+    """Return the current remote GPU SSH config (or empty if not set)."""
+    cfg = _load_remote_cfg()
+    return cfg or {"enabled": False, "host": "", "port": 22, "user": "", "venv_python": "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python"}
+
+
+@router.post("/remote")
+def set_remote(cfg: RemoteConfig):
+    """Save SSH config for remote GPU training."""
+    _save_remote_cfg(cfg.model_dump())
+    return {"status": "saved"}
+
+
+@router.delete("/remote")
+def clear_remote():
+    """Disable remote GPU — revert to local execution."""
+    _save_remote_cfg({"enabled": False})
+    return {"status": "cleared"}
+
+
+@router.post("/remote/test")
+def test_remote(cfg: RemoteConfig):
+    """
+    Test SSH connectivity and verify the venv Python exists on the remote.
+    Returns {ok: bool, message: str}.
+    """
+    ssh_prefix = _build_ssh_prefix(cfg.model_dump())
+    venv_py = cfg.venv_python.strip()
+
+    try:
+        result = subprocess.run(
+            ssh_prefix + [f"{venv_py} --version && nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'no-gpu'"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            if "Permission denied" in stderr:
+                return {"ok": False, "message": "SSH key auth failed — run: ssh-copy-id -p {port} {user}@{host}".format(**cfg.model_dump())}
+            if "Connection refused" in stderr or "No route" in stderr:
+                return {"ok": False, "message": f"Cannot reach {cfg.host}:{cfg.port} — is the machine on and port correct?"}
+            return {"ok": False, "message": stderr or "SSH command failed (exit %d)" % result.returncode}
+
+        output = result.stdout.strip()
+        gpu_line = ""
+        for line in output.splitlines():
+            if "Python" not in line and line.strip() and line != "no-gpu":
+                gpu_line = line.strip()
+                break
+        python_ver = next((l for l in output.splitlines() if "Python" in l), "unknown")
+        msg = f"Connected ✓  {python_ver}"
+        if gpu_line:
+            msg += f"  |  GPU: {gpu_line}"
+        else:
+            msg += "  |  No GPU detected"
+        return {"ok": True, "message": msg}
+
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "message": f"Connection timed out after 15s — is {cfg.host}:{cfg.port} reachable?"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+@router.post("/start")
+def train_start(config: TrainConfig):
+    # Block if our Popen handle is alive
+    if state.train_process is not None and state.train_process.poll() is None:
+        raise HTTPException(409, "Training is already running (PID %d)" % state.train_process.pid)
+    # Also block if an orphaned process from a previous server session is still alive
+    orphan = state.get_orphan_pid()
+    if orphan:
+        raise HTTPException(409, "Training is already running (PID %d, orphaned from previous session)" % orphan)
+
+    if config.domain not in state.DOMAINS:
+        raise HTTPException(404, "Unknown domain: %s" % config.domain)
+
+    domain_cfg = state.DOMAINS[config.domain]
+    if not domain_cfg["available"]:
+        raise HTTPException(400, "Domain '%s' is not available yet" % config.domain)
+
+    # Write config JSON for train.py to consume
+    os.makedirs("runs", exist_ok=True)
+    cfg_path = "runs/ui_train_config.json"
+    with open(cfg_path, "w") as f:
+        json.dump({
+            "dataset_dir":             domain_cfg["data_dir"],
+            "checkpoint_dir":          os.path.dirname(domain_cfg["checkpoint"]),
+            "num_epochs":              config.epochs,
+            "batch_size":              config.batch_size,
+            "lr":                      config.lr,
+            "noise_std":               config.noise_std,
+            "early_stopping_patience": config.early_stopping_patience,
+            "message_passing_num":     config.message_passing_steps,
+            "log_dir":                 "runs",
+        }, f)
+
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    log_file = open(state.train_log_path, "w")
+
+    remote_cfg = _load_remote_cfg()
+    if remote_cfg:
+        # ── Remote GPU execution over SSH ─────────────────────────────────────
+        venv_py   = remote_cfg.get("venv_python", "~/ML/meshGraphNets_pytorch/venv/bin/python").strip()
+        cfg_abs   = os.path.join(project_root, cfg_path)
+        ssh_prefix = _build_ssh_prefix(remote_cfg)
+        # Run train.py on the remote; shared filesystem means both sides see the same files
+        remote_cmd = f"cd {shlex.quote(project_root)} && {shlex.quote(venv_py)} -u train.py --config {shlex.quote(cfg_abs)}"
+        cmd = ssh_prefix + [remote_cmd]
+        execution = "remote"
+    else:
+        # ── Local execution ───────────────────────────────────────────────────
+        venv_python = os.path.join(project_root, "venv", "bin", "python")
+        python_bin  = venv_python if os.path.exists(venv_python) else sys.executable
+        cmd = [python_bin, "-u", "train.py", "--config", cfg_path]
+        execution = "local"
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        cwd=project_root,
+    )
+    log_file.close()
+    state.train_process = proc
+    state.save_train_pid(proc.pid)
+    state.clear_model_cache()
+
+    return {"pid": proc.pid, "status": "started", "execution": execution}
+
+
+@router.post("/stop")
+def train_stop():
+    stopped = False
+    if state.train_process is not None and state.train_process.poll() is None:
+        state.train_process.send_signal(signal.SIGTERM)
+        state.train_process = None
+        stopped = True
+    orphan = state.get_orphan_pid()
+    if orphan:
+        try:
+            os.kill(orphan, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        stopped = True
+    state.clear_train_pid()
+    if not stopped:
+        raise HTTPException(400, "No training process is running")
+    return {"status": "stopped"}
+
+
+@router.get("/status")
+async def train_status():
+    is_running = (
+        (state.train_process is not None and state.train_process.poll() is None)
+        or state.get_orphan_pid() is not None
+    )
+    if not is_running:
+        state.clear_train_pid()
+    epochs = await asyncio.get_running_loop().run_in_executor(
+        None, _parse_log, state.train_log_path
+    )
+    best = min(epochs, key=lambda e: e["valid_loss"]) if epochs else None
+
+    return {
+        "running":         is_running,
+        "pid":             state.train_process.pid if is_running and state.train_process else None,
+        "epochs":          epochs,
+        "best_epoch":      best["epoch"]      if best else None,
+        "best_valid_loss": best["valid_loss"] if best else None,
+        "remote":          _load_remote_cfg() is not None,
+    }
+
+
+@router.get("/stream")
+async def train_stream():
+    """
+    SSE stream — polls the training log every 5s and emits new epoch events.
+    """
+    async def event_generator() -> AsyncGenerator[str, None]:
+        seen_epochs: set[int] = set()
+        best_loss = float("inf")
+        dead_polls = 0
+
+        while True:
+            epochs = await asyncio.get_running_loop().run_in_executor(
+                None, _parse_log, state.train_log_path
+            )
+            for ep in epochs:
+                if ep["epoch"] not in seen_epochs:
+                    seen_epochs.add(ep["epoch"])
+                    dead_polls = 0
+                    yield "data: %s\n\n" % json.dumps({
+                        "type":        "epoch",
+                        "epoch":       ep["epoch"],
+                        "train_loss":  ep["train_loss"],
+                        "valid_loss":  ep["valid_loss"],
+                    })
+                    if ep["valid_loss"] < best_loss:
+                        best_loss = ep["valid_loss"]
+                        yield "data: %s\n\n" % json.dumps({
+                            "type":       "best",
+                            "epoch":      ep["epoch"],
+                            "valid_loss": ep["valid_loss"],
+                        })
+
+            is_running = (
+                (state.train_process is not None and state.train_process.poll() is None)
+                or state.get_orphan_pid() is not None
+            )
+            if not is_running:
+                if seen_epochs:
+                    state.clear_train_pid()
+                    yield "data: %s\n\n" % json.dumps({"type": "done", "reason": "completed"})
+                    break
+                else:
+                    dead_polls += 1
+                    if dead_polls >= 3:
+                        state.clear_train_pid()
+                        yield "data: %s\n\n" % json.dumps({
+                            "type":    "error",
+                            "message": _friendly_error(state.train_log_path),
+                        })
+                        break
+
+            await asyncio.sleep(5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

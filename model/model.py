@@ -54,7 +54,7 @@ class GnBlock(nn.Module):
         self.nb_module = NodeBlock(custom_func=nb_custom_func)
 
     def forward(self, graph):
-    
+
         x = graph.x.clone()
         edge_attr = graph.edge_attr.clone()
 
@@ -63,7 +63,7 @@ class GnBlock(nn.Module):
 
         x = x + graph.x
         edge_attr = edge_attr + graph.edge_attr
-        
+
         return Data(x=x, edge_attr=edge_attr, edge_index=graph.edge_index)
 
 

@@ -41,10 +41,10 @@ class FpcDataset(Dataset):
         pos = torch.as_tensor(pos.copy(), dtype=torch.float32)
         face = torch.as_tensor(cells.T.copy(), dtype=torch.int64)
         y = torch.as_tensor(tra_target.copy(), dtype=torch.float32)
-        
+
         graph = Data(x=x,pos=pos,face=face,y=y)
 
         return graph
-    
+
     def __len__(self):
         return self.total_samples

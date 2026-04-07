@@ -24,6 +24,7 @@ venv_gpu/
 CONTEXT.md
 DEEP_LEARNING_TUTORIAL.md
 OVERVIEW.md
+docs/*
 
 # Dataset metadata
 meta.json

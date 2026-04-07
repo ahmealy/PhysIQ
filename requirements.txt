@@ -1,10 +1,21 @@
-matplotlib
-numpy
-opencv_python
-packaging
-Pillow
-torch
-torch_geometric
-torch_scatter
-tqdm
-tensorboard
+# ──────────────────────────────────────────────────────────────────────────────
+# Install order matters — torch must come before torch-geometric.
+#
+# 1. GPU (CUDA 13.0):
+#    pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+#
+# 1. CPU only:
+#    pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# 2. torch-geometric (same for both):
+#    pip install torch-geometric==2.7.0
+#
+# 3. Everything else (reads pyproject.toml):
+#    pip install -e .
+#
+# Or install dev extras too:
+#    pip install -e ".[dev]"
+# ──────────────────────────────────────────────────────────────────────────────
+
+# torch and torch-geometric are intentionally omitted here — see above.
+-e .

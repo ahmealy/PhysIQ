@@ -69,10 +69,15 @@ if __name__ == '__main__':
 
         with ProcessPoolExecutor() as executor:
             futures = {executor.submit(render, (i, result, crds, triang, v_max, v_min)): i for i in range(600 // 5)}
+            frames = {}
             for future in tqdm(as_completed(futures), total=len(futures)):
                 img, i = future.result()
-                img_resized = cv2.resize(img, (1700, 800))
-                out.write(img_resized)
+                frames[i] = img
+        # Write frames in correct order — as_completed() returns in completion
+        # order which is non-deterministic; sorting by index fixes scrambled video
+        for i in sorted(frames.keys()):
+            img_resized = cv2.resize(frames[i], (1700, 800))
+            out.write(img_resized)
 
         out.release()
         print('video %s saved' % file_name)

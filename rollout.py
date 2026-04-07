@@ -1,10 +1,11 @@
 import argparse
 import os
 import pickle
+import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch_geometric.loader import DataLoader
 import torch_geometric.transforms as T
 from tqdm import tqdm
 
@@ -12,94 +13,164 @@ from dataset import FpcDataset
 from model.simulator import Simulator
 from utils.utils import NodeType
 
-def rollout_error(predicteds, targets):
+
+def rollout_error(predicteds, targets, rollout_index=0, save_dir='result'):
+    """
+    Compute per-step RMSE between predicted and target velocity fields.
+    Saves a plot to save_dir/rollout_error_<rollout_index>.png.
+
+    Returns:
+        per_step_rmse: np.ndarray of shape [T] — RMSE at each timestep
+    """
     number_len = targets.shape[0]
-    squared_diff = np.square(predicteds - targets).reshape(number_len, -1)
-    loss = np.sqrt(np.cumsum(np.mean(squared_diff, axis=1), axis=0)/np.arange(1, number_len+1))
-    for show_step in range(0, 1000000, 50):
-        if show_step <number_len:
-            print('testing rmse  @ step %d loss: %.2e'%(show_step, loss[show_step]))
-        else: break
-    return loss
+
+    # Per-step RMSE: sqrt(mean squared error across all nodes at each timestep)
+    squared_diff = np.square(predicteds - targets)           # [T, N, 2]
+    per_step_mse = np.mean(squared_diff.reshape(number_len, -1), axis=1)  # [T]
+    per_step_rmse = np.sqrt(per_step_mse)                    # [T]
+
+    # Print at every 50 steps
+    for step in range(0, number_len, 50):
+        print('rollout rmse @ step %d: %.2e' % (step, per_step_rmse[step]))
+
+    # Save RMSE plot
+    os.makedirs(save_dir, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(per_step_rmse, linewidth=1.5, color='steelblue')
+    ax.set_xlabel('Timestep')
+    ax.set_ylabel('RMSE (velocity)')
+    ax.set_title('Rollout RMSE vs Timestep — Trajectory %d' % rollout_index)
+    ax.grid(True, alpha=0.3)
+    plot_path = os.path.join(save_dir, 'rollout_error_%d.png' % rollout_index)
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print('RMSE plot saved to %s' % plot_path)
+
+    return per_step_rmse
 
 
 @torch.no_grad()
-def rollout(model, dataset, rollout_index=1):
+def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
+    """
+    Autoregressive rollout for a single trajectory.
 
-    num_sampes_per_tra = dataset.num_sampes_per_tra
+    Args:
+        model:          trained Simulator
+        dataset:        FpcDataset (test split)
+        transformer:    PyG transform compose (FaceToEdge + Cartesian + Distance)
+        rollout_index:  which trajectory in the dataset to roll out
+        device:         torch device string
+
+    Returns:
+        result:     [predicted_velocities, target_velocities] — each [T, N, 2]
+        crds:       node positions [N, 2]
+        elapsed:    wall-clock seconds for the full rollout
+    """
+    num_samples_per_tra = dataset.num_sampes_per_tra
     predicted_velocity = None
-    mask=None
+    boundary_mask = None
     predicteds = []
     targets = []
 
-    for i in range(num_sampes_per_tra):
-        index = rollout_index * num_sampes_per_tra + i
+    t_start = time.perf_counter()
+
+    for i in tqdm(range(num_samples_per_tra), desc='Rollout trajectory %d' % rollout_index):
+        index = rollout_index * num_samples_per_tra + i
         graph = dataset[index]
         graph = transformer(graph)
-        graph = graph.cuda()
+        graph = graph.to(device)
 
-        if mask is None:
+        # Build boundary mask once from step 0 — assumes fixed topology (cylinder_flow).
+        # For domains with dynamic node types, this would need to be re-evaluated each step.
+        if boundary_mask is None:
             node_type = graph.x[:, 0]
-            mask = torch.logical_or(node_type==NodeType.NORMAL, node_type==NodeType.OUTFLOW)
-            mask = torch.logical_not(mask)
+            fluid_mask = torch.logical_or(
+                node_type == NodeType.NORMAL,
+                node_type == NodeType.OUTFLOW
+            )
+            boundary_mask = torch.logical_not(fluid_mask)
 
+        # Swap in own prediction (skip on first step — use ground truth as seed)
         if predicted_velocity is not None:
             graph.x[:, 1:3] = predicted_velocity.detach()
-        
-        next_v = graph.y
-        with torch.no_grad():
-            predicted_velocity = model(graph, velocity_sequence_noise=None)
 
-        predicted_velocity[mask] = next_v[mask]
+        next_v = graph.y  # ground truth at t+1
+
+        predicted_velocity = model(graph, velocity_sequence_noise=None)
+
+        # Pin boundary nodes back to ground truth
+        predicted_velocity[boundary_mask] = next_v[boundary_mask]
 
         predicteds.append(predicted_velocity.detach().cpu().numpy())
         targets.append(next_v.detach().cpu().numpy())
-        
+
+    elapsed = time.perf_counter() - t_start
+
+    # NOTE: crds saved from the last frame only — valid for cylinder_flow (fixed mesh).
+    # For deformable-mesh domains, node positions change per timestep and would need
+    # per-frame saving.
     crds = graph.pos.cpu().numpy()
     result = [np.stack(predicteds), np.stack(targets)]
 
+    # Save result pkl
     os.makedirs('result', exist_ok=True)
-    with open('result/result' + str(rollout_index) + '.pkl', 'wb') as f:
+    pkl_path = 'result/result%d.pkl' % rollout_index
+    with open(pkl_path, 'wb') as f:
         pickle.dump([result, crds], f)
-    
-    return result
+    print('Result saved to %s' % pkl_path)
+
+    return result, crds, elapsed
 
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description='Implementation of MeshGraphNets')
-    parser.add_argument("--gpu",
-                        type=int,
-                        default=0,
-                        help="gpu number: 0 or 1")
-
-    parser.add_argument("--model_dir",
-                        type=str,
-                        default='checkpoints/best_model.pth')
-
-    parser.add_argument("--test_split", type=str, default='test')
-    parser.add_argument("--rollout_num", type=int, default=1)
-
+    parser = argparse.ArgumentParser(description='MeshGraphNets rollout and evaluation')
+    parser.add_argument('--gpu',        type=int,   default=0)
+    parser.add_argument('--model_dir',  type=str,   default='checkpoints/best_model.pth')
+    parser.add_argument('--test_split', type=str,   default='test')
+    parser.add_argument('--rollout_num', type=int,  default=1)
     args = parser.parse_args()
 
-    # load model
-    torch.cuda.set_device(args.gpu)
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    simulator = Simulator(message_passing_num=15, node_input_size=11, edge_input_size=3, device=device)
+    device = 'cuda:%d' % args.gpu if torch.cuda.is_available() else 'cpu'
+    torch.cuda.set_device(args.gpu) if torch.cuda.is_available() else None
 
-    state_dict  = torch.load(args.model_dir, weights_only=False)
+    # Load model
+    simulator = Simulator(
+        message_passing_num=15,
+        node_input_size=11,
+        edge_input_size=3,
+        device=device
+    )
+    state_dict = torch.load(args.model_dir, map_location=device, weights_only=False)
     simulator.load_state_dict(state_dict['model_state_dict'])
     simulator.eval()
+    print('Model loaded from %s (epoch %d, valid loss %.2e)' % (
+        args.model_dir, state_dict['epoch'], state_dict['valid_loss']
+    ))
 
-    # prepare dataset
-    dataset_dir = "data"
-    dataset = FpcDataset(dataset_dir, split=args.test_split)
-    transformer = T.Compose([T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)])
+    # Prepare dataset and transforms
+    transformer = T.Compose([
+        T.FaceToEdge(),
+        T.Cartesian(norm=False),
+        T.Distance(norm=False)
+    ])
+    dataset = FpcDataset('data', split=args.test_split)
+    print('Dataset: %d trajectories x %d steps' % (
+        len(dataset) // dataset.num_sampes_per_tra, dataset.num_sampes_per_tra
+    ))
 
+    # Run rollouts
     for i in range(args.rollout_num):
-        result = rollout(simulator, dataset, rollout_index=i)
-        print('------------------------------------------------------------------')
-        rollout_error(result[0], result[1])
+        print('\n' + '='*60)
+        result, crds, elapsed = rollout(simulator, dataset, transformer,
+                                        rollout_index=i, device=device)
+        n_steps = result[0].shape[0]
+        sim_time = n_steps * 0.01   # dt = 0.01s per step
+        print('\nInference: %d steps in %.2fs  (%.1fx faster than real-time sim)' % (
+            n_steps, elapsed, sim_time / elapsed
+        ))
+        print('='*60)
+        rollout_error(result[0], result[1], rollout_index=i)
 
 
     

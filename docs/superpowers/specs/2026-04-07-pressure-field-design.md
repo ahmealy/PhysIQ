@@ -1,22 +1,50 @@
 # Spec: Pressure Field (cylinder_flow)
 
 Date: 2026-04-07  
-Status: Draft
+Status: Updated
 
 ---
 
 ## 1. Overview
 
-The `cylinder_flow` TFRecords contain a `pressure` field `[T=600, N, 1]` that is currently parsed by TensorFlow but then silently discarded. This spec adds:
+The `cylinder_flow` TFRecords contain a `pressure` field `[T=600, N, 1]` that is currently
+parsed by TensorFlow but silently discarded. DeepMind's own implementation also ignores it.
 
-1. **Re-parse**: Extract pressure from TFRecords and save alongside velocity
-2. **Node feature**: Add pressure as an additional input feature to the model
-3. **Second output head**: Predict pressure in addition to velocity
-4. **Visualization**: Show pressure field in the mesh viewer alongside velocity
+This spec adds pressure as a **user-selectable target field** — a completely separate,
+independent surrogate model trained on pressure instead of velocity. The user chooses
+**once at training time** which field to predict. Two separate training runs produce two
+separate checkpoints; everything downstream reads the mode from checkpoint metadata.
+
+This mirrors how PhysicsAI Studio works: separate surrogate models per quantity of interest.
 
 ---
 
-## 2. Confirmed TFRecord Field
+## 2. Design Principle: Two Independent Single-Task Models
+
+| `target_field` | Input node features | Output | Node input size | Output size |
+|---|---|---|---|---|
+| `velocity` (default) | v[2] + node_type[9] | v[2] | **11** — exact DeepMind | 2 |
+| `pressure` | p[1] + node_type[9] | p[1] | **10** | 1 |
+
+**Why not multi-task (predict both simultaneously)?**
+- Multi-task requires balancing two loss scales — needs careful λ tuning
+- Feeding predicted pressure back into velocity prediction introduces cross-field error accumulation
+- Two clean single-task models are easier to evaluate and explain
+
+**Why not "pressure as input, velocity as output"?**
+- At rollout time, ground-truth pressure is not available — you'd need to feed predicted pressure
+  back in, which couples the two fields and accumulates error
+- If GT pressure is used instead, it leaks future information — artificially inflates accuracy
+- This design is not scientifically clean; removed from spec
+
+**Pressure-only model integration:**
+Same as velocity — `p_{t+1} = p_t + Δp` where `Δp` is the model's predicted (denormalized) output.
+Autoregressive rollout feeds predicted pressure back. Error accumulates in pressure only —
+no cross-field coupling.
+
+---
+
+## 3. Confirmed TFRecord Field
 
 From `data/meta.json`:
 ```json
@@ -26,23 +54,8 @@ From `data/meta.json`:
   "type": "dynamic"
 }
 ```
-Shape per trajectory: `[T=600, N, 1]` — one scalar pressure value per node per timestep.
-
-This field is fully readable by the existing `_parse()` function in `parse_tfrecord.py` — it's just never extracted or saved.
-
----
-
-## 3. Two Separable Sub-Features
-
-Pressure touches two independent things:
-
-**A — Pressure as input feature**: Add `pressure_t` to node features at each timestep. The model gets richer physics signal (pressure drives flow) → likely improves velocity prediction accuracy. Node input size: `11 → 12`.
-
-**B — Pressure as output head**: Add a second decoder head predicting `pressure_{t+1}`. This is a multi-task learning setup — the model predicts both velocity and pressure simultaneously.
-
-These are separable. Sub-feature A is simpler and lower risk. Sub-feature B requires careful multi-task loss balancing.
-
-**Decision**: Implement both, but A is the priority. B is additive on top.
+Shape per trajectory: `[T=600, N, 1]` — one scalar pressure per node per timestep.
+Fully readable by existing `_parse()` in `parse_tfrecord.py` — never extracted or saved.
 
 ---
 
@@ -51,199 +64,192 @@ These are separable. Sub-feature A is simpler and lower risk. Sub-feature B requ
 ### Modified files
 | File | Change |
 |---|---|
-| `data/parse_tfrecord.py` | Extract `pressure` field, save to `train_pressure.dat`, `valid_pressure.dat`, `test_pressure.dat` |
-| `dataset/fpc.py` | Load pressure `.dat`, include `pressure_t` in `graph.x`, include `pressure_{t+1}` in `graph.pressure_y` |
-| `model/simulator.py` | `update_node_attr`: add pressure to node features; add `pressure_head` decoder; forward returns pressure prediction too |
-| `model/model.py` | `EncoderProcesserDecoder`: add optional `pressure_output_size` param; instantiate second `Decoder` for pressure |
-| `train.py` | Multi-task loss: `loss = loss_vel + lambda_p * loss_pressure`; `lambda_p = 0.1` default |
-| `api/routes/rollout.py` | Save pressure predictions to pkl alongside velocity |
-| `api/routes/results.py` | New `GET /results/{filename}/frame/{t}` returns pressure field; new field in rmse response |
-| `app/src/pages/Visualize.tsx` | Pressure colormap toggle in mesh viewer; pressure time series chart |
+| `data/parse_tfrecord.py` | Extract `pressure`, save `{split}_pressure.dat` alongside velocity |
+| `dataset/fpc.py` | Load pressure `.dat`; when `target_field=pressure`, swap pressure into `graph.x` and `graph.y` |
+| `model/model.py` | `output_size` already made a constructor param (flag_simple spec) — no further change |
+| `model/simulator.py` | `target_field`-aware: build node features from pressure or velocity; single output head always |
+| `train.py` | Read `target_field` from config; single loss, same structure regardless of field |
+| `api/state.py` | Add `target_field` to DOMAINS config for cylinder_flow |
+| `api/routes/rollout.py` | Domain-aware rollout: use `target_field` from checkpoint metadata |
+| `api/routes/results.py` | Return `target_field` in result metadata; pressure RMSE when applicable |
+| `app/src/pages/Train.tsx` | "Target field" dropdown: Velocity / Pressure |
+| `app/src/pages/Predict.tsx` | Show field label from checkpoint metadata |
+| `app/src/pages/Visualize.tsx` | Mesh viewer field selector; pressure time series in Physics tab |
 
 ---
 
 ## 5. Re-parsing
 
-### `parse_tfrecord.py` changes
-
-Add pressure extraction in the main loop alongside velocity:
+`parse_tfrecord.py` gains pressure extraction — idempotent (skips if `.dat` already exists):
 
 ```python
 pressure = d['pressure'].numpy()   # [T, N, 1]
-
-# Save as .dat alongside velocity
-with open(f'data/{split}_pressure.dat', 'wb') as f:
-    np.save(f, pressure)  # shape stored in file
+np.save(open(f'data/{split}_pressure.dat', 'wb'), pressure)
 ```
 
-The `.dat` format already used for velocity works identically for pressure — same `np.save` / `np.load` pattern.
-
-**Re-parsing required**: Users who already have parsed data need to re-run `parse_tfrecord.py`. The script checks if pressure `.dat` already exists and skips if so (idempotent).
+Same `.dat` format as velocity. Re-parsing takes ~2 min. No re-download needed.
 
 ---
 
-## 6. Dataset
+## 6. Dataset (`dataset/fpc.py`)
 
-### `FpcDataset.__getitem__` changes
+`FpcDataset` gains a `target_field` constructor param (`'velocity'` or `'pressure'`).
 
+**When `target_field='velocity'`** (default, unchanged):
 ```python
-# Current graph.x: [N, 3] = [node_type[1], velocity_x[1], velocity_y[1]]
-# New graph.x:     [N, 4] = [node_type[1], velocity_x[1], velocity_y[1], pressure[1]]
-
-pressure_t = self.pressure_data[traj_idx][t]   # [N, 1]
-x = np.concatenate([node_type, tra_velocity, pressure_t], axis=-1)  # [N, 4]
-
-graph.pressure_y = pressure_{t+1}  # [N, 1] — target pressure
+graph.x = [node_type[1], velocity_x[1], velocity_y[1]]   # [N, 3] raw
+graph.y = velocity_{t+1}                                   # [N, 2]
 ```
+`node_input_size = 11` after feature construction in Simulator.
 
-Backward compatibility: if pressure `.dat` doesn't exist (user hasn't re-parsed), `FpcDataset` falls back to `node_input_size=11` (no pressure). Controlled by a `use_pressure` flag in config, default `True` if file exists.
+**When `target_field='pressure'`**:
+```python
+graph.x = [node_type[1], pressure_t[1]]   # [N, 2] raw
+graph.y = pressure_{t+1}                   # [N, 1]
+```
+`node_input_size = 10` after feature construction in Simulator.
+
+Backward compatibility: if `{split}_pressure.dat` doesn't exist and `target_field='pressure'`
+is requested, raise a clear error: *"Pressure data not found — re-run parse_tfrecord.py"*.
 
 ---
 
 ## 7. Model
 
-### Node features (updated)
-
-In `Simulator.update_node_attr`:
-```python
-# Before: velocity[2] + one_hot[9] = 11
-# After:  velocity[2] + one_hot[9] + pressure[1] = 12
-
-pressure = graph.x[:, 3:4]   # [N, 1]
-node_feats = cat([frames, one_hot, pressure], dim=-1)   # [N, 12]
-```
-
-`_node_normalizer` size: `11 → 12`.
-
-### Second output head (pressure)
-
-In `EncoderProcesserDecoder`:
-```python
-class EncoderProcesserDecoder(nn.Module):
-    def __init__(self, ..., output_size=2, pressure_output_size=0):
-        ...
-        self.decoder = Decoder(hidden_size, output_size)
-        self.pressure_decoder = (
-            Decoder(hidden_size, pressure_output_size)
-            if pressure_output_size > 0 else None
-        )
-    
-    def forward(self, graph):
-        graph = self.encoder(graph)
-        for block in self.processer_list:
-            graph = block(graph)
-        vel = self.decoder(graph)
-        pres = self.pressure_decoder(graph) if self.pressure_decoder else None
-        return vel, pres
-```
-
-The pressure decoder is a **separate MLP from the same latent** — same architecture as velocity decoder, output size 1. Both decoders have no LayerNorm (same as DeepMind).
-
-### Multi-task loss in `train.py`
+### `Simulator.update_node_attr` — field-aware
 
 ```python
-pred_vel_norm, pred_pres_norm = model(graph, noise)
-
-# Velocity loss (existing)
-loss_vel = mse(pred_vel_norm[fluid_mask], target_vel_norm[fluid_mask])
-
-# Pressure loss (new)
-if pred_pres_norm is not None:
-    target_pres_norm = pressure_normalizer(graph.pressure_y, training=True)
-    loss_pres = mse(pred_pres_norm[fluid_mask], target_pres_norm[fluid_mask])
-    loss = loss_vel + cfg.get('lambda_pressure', 0.1) * loss_pres
-else:
-    loss = loss_vel
+def update_node_attr(self, frames: Tensor, types: Tensor) -> Tensor:
+    # frames: [N, 2] if velocity, [N, 1] if pressure
+    one_hot = F.one_hot(types.squeeze(-1).long(), num_classes=9)  # [N, 9]
+    node_feats = cat([frames, one_hot], dim=-1)  # [N, 11] or [N, 10]
+    return self._node_normalizer(node_feats, self.training)
 ```
 
-`lambda_pressure = 0.1` — pressure is a secondary task; velocity accuracy is the primary goal.
+`frames` carries either velocity or pressure — the rest of the code is identical.
+`node_input_size` is passed in from config, not hardcoded.
+
+### `Simulator.forward` — same structure for both fields
+
+Training:
+```python
+target_change = graph.y - frames        # acceleration (vel) or pressure change
+target_norm   = output_normalizer(target_change, training=True)
+predicted_norm = model(graph)
+return predicted_norm, target_norm
+```
+
+Inference:
+```python
+predicted_norm = model(graph)
+delta = output_normalizer.inverse(predicted_norm)
+next_value = frames + delta             # v_{t+1} or p_{t+1}
+return next_value
+```
+
+`output_size`: 2 for velocity, 1 for pressure — passed from config.
+
+### No architecture change
+`EncoderProcesserDecoder` is unchanged beyond the `output_size` param already added for
+flag_simple. The GNN processes whatever normalized node features it receives — it doesn't
+know or care whether they represent velocity or pressure.
 
 ---
 
-## 8. Rollout
+## 8. Training Config
 
-In `_rollout_cfd`, after each step save the pressure prediction:
-
-```python
-pred_pressure = pressure_normalizer.inverse(pred_pres_norm)  # [N, 1]
-pressures.append(pred_pressure.cpu().numpy())
+```json
+{
+  "domain": "cylinder_flow",
+  "target_field": "velocity",   // or "pressure"
+  "node_input_size": 11,        // 10 for pressure
+  "output_size": 2,             // 1 for pressure
+  "checkpoint_dir": "checkpoints"
+}
 ```
 
-Saved in pkl as additional field:
+`node_input_size` and `output_size` are derived automatically from `target_field` in
+`api/routes/train.py` — user only picks the field, the sizes are computed server-side.
+
+Checkpoint metadata saves `target_field` so Predict and Visualize know which model they loaded:
 ```python
-pickle.dump([[predicted_vel, targets_vel], crds, {
-    "predicted_pressure": np.stack(pressures),   # [T, N, 1]
-    "target_pressure":    np.stack(target_pres),  # [T, N, 1]
-    "confidence_score":   confidence_score,        # from confidence spec
+torch.save({
+    'epoch': ...,
+    'model_state_dict': ...,
+    'optimizer_state_dict': ...,
+    'valid_loss': ...,
+    'target_field': cfg['target_field'],   # new
+    'node_input_size': ...,                # new
+    'output_size': ...,                    # new
+}, path)
+```
+
+---
+
+## 9. Rollout
+
+`api/routes/rollout.py` reads `target_field` from checkpoint metadata:
+
+```python
+target_field = ckpt.get('target_field', 'velocity')
+
+# Swap field: velocity uses graph.x[:,1:3], pressure uses graph.x[:,1:2]
+if target_field == 'velocity':
+    graph.x[:, 1:3] = predicted.detach()
+else:
+    graph.x[:, 1:2] = predicted.detach()
+```
+
+Result pkl gains metadata:
+```python
+pickle.dump([[predicted, targets], crds, {
+    "target_field": target_field,
+    "confidence_score": confidence_score,
 }], f)
 ```
 
 ---
 
-## 9. API
+## 10. API
 
-### `GET /results/{filename}/frame/{t}`
-Adds:
-```json
-{
-  "predicted_pressure": [...],    // [N] scalar per node
-  "target_pressure":    [...]     // [N] scalar per node
-}
-```
+### `GET /results/{filename}`
+Adds `target_field` to response — frontend uses this to label axes correctly.
 
 ### `GET /results/{filename}/rmse`
-Adds:
-```json
-{
-  "per_step_pressure_rmse": [...],
-  "pressure_rmse_at_0":     0.0012,
-  "pressure_rmse_at_end":   0.0089
-}
-```
+Returns same structure regardless of field — `per_step_rmse`, `mae_at_0`, etc.
+Axis label is determined by `target_field` in the response.
+
+### `GET /results/{filename}/frame/{t}`
+Returns `predicted_magnitude` and `target_magnitude` — for pressure these are scalar
+values directly (no `norm()` needed since pressure is already scalar).
 
 ---
 
-## 10. Visualization
+## 11. UI
 
-### Mesh viewer toggle
-Add a field selector in the Visualize page mesh viewer:
-- **Velocity magnitude** (existing, default)
-- **Pressure** (new)
-- **Velocity error** (existing)
-- **Pressure error** (new)
+### Training page (`Train.tsx`)
+Add "Target field" dropdown below domain selector:
+- **Velocity** (default) — *"Predict fluid velocity field (DeepMind baseline)"*
+- **Pressure** — *"Predict pressure field (requires re-parsed data)"*
 
-When "Pressure" is selected, the colormap uses the `predicted_pressure` values instead of velocity magnitude. Same triangulation, same colormap scale logic.
+Grayed out with tooltip if pressure `.dat` files not present.
 
-### Pressure time series
-In the Physics tab (currently shows kinetic energy + divergence), add:
-- Mean pressure over time (predicted vs ground truth)
-- Pressure RMSE over time
+### Predict page (`Predict.tsx`)
+Show checkpoint's `target_field` as a badge: `VELOCITY MODEL` or `PRESSURE MODEL`.
+No user choice here — determined by which checkpoint is loaded.
 
----
+### Visualize page (`Visualize.tsx`)
+Mesh viewer field selector adapts to `target_field`:
+- Velocity model: toggle between **Velocity magnitude** / **Velocity error**
+- Pressure model: toggle between **Pressure** / **Pressure error**
 
-## 11. Config / Backward Compatibility
-
-`use_pressure` flag in train config JSON (default: `True` if pressure `.dat` exists, `False` otherwise).
-
-If `use_pressure=False`:
-- `node_input_size = 11` (no change to existing behavior)
-- `pressure_output_size = 0` (no second head)
-- Existing checkpoints load fine
-
-If `use_pressure=True`:
-- `node_input_size = 12`
-- `pressure_output_size = 1`
-- Existing checkpoints are **incompatible** (different input size) — must retrain
-
-The UI shows a "Pressure field" toggle in Training config. Default: on if pressure data is available.
+Physics tab pressure time series: shown only when `target_field=pressure`.
+All axis labels, units, and chart titles adapt to field.
 
 ---
 
-## 12. Re-parse Required
+## 12. Backward Compatibility
 
-Users must re-run `parse_tfrecord.py` to extract pressure. The script:
-1. Checks for existing `train_pressure.dat` — skips if present
-2. Re-reads TFRecords to extract pressure
-3. Saves pressure `.dat` files
-
-Since the TFRecords are still on disk, re-parsing is fast (~2 min). No re-download needed.
+- Existing velocity checkpoints: `target_field` missing → defaults to `'velocity'` → fully compatible
+- Existing result pkls: metadata dict missing → defaults to `target_field='velocity'` → fully compatible
+- No forced re-parsing unless user selects pressure mode

@@ -80,18 +80,21 @@ class Decoder(nn.Module):
 
 class EncoderProcesserDecoder(nn.Module):
 
-    def __init__(self, message_passing_num, node_input_size, edge_input_size, hidden_size=128):
+    def __init__(self, message_passing_num, node_input_size, edge_input_size,
+                 hidden_size=128, output_size=2):
 
         super(EncoderProcesserDecoder, self).__init__()
 
-        self.encoder = Encoder(edge_input_size=edge_input_size, node_input_size=node_input_size, hidden_size=hidden_size)
-        
+        self.encoder = Encoder(edge_input_size=edge_input_size,
+                               node_input_size=node_input_size,
+                               hidden_size=hidden_size)
+
         processer_list = []
         for _ in range(message_passing_num):
             processer_list.append(GnBlock(hidden_size=hidden_size))
         self.processer_list = nn.ModuleList(processer_list)
-        
-        self.decoder = Decoder(hidden_size=hidden_size, output_size=2)
+
+        self.decoder = Decoder(hidden_size=hidden_size, output_size=output_size)
 
     def forward(self, graph):
 

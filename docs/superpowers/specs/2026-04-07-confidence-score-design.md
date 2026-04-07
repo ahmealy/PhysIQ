@@ -18,48 +18,58 @@ specifically asked about k-d trees in this context.
 
 ---
 
-## 2. Backend Design: C++ k-d Tree with pybind11, scipy fallback
-
-### Why C++ instead of FAISS?
-
-| | Custom C++ + pybind11 | FAISS | scipy KDTree |
-|---|---|---|---|
-| Interview signal | ✅ "I implemented k-d tree in C++" | "I used Meta's library" | "I used scipy" |
-| Performance | O(log N), competitive with scipy at N≤10K | Overkill for N≤10K | O(log N), same complexity |
-| Dependencies | pybind11 (header-only) | pip install faiss-cpu | built-in |
-| Maintenance | We own it | Zero | Zero |
-
-At N=1000 training trajectories all three have identical performance. The C++ implementation
-is **not for performance** — it demonstrates understanding of the data structure itself.
-This is the right answer when an interviewer asks "do you know k-d trees."
+## 2. Backend Design: scipy primary, C++ opt-in, benchmark both
 
 ### Backend selection (runtime)
 
 ```
-Primary:  C++ extension (confidence/_kdtree.so) — used if compiled
-Fallback: scipy.spatial.KDTree — used if C++ extension not built
+Default:   scipy.spatial.KDTree  — always available, zero setup, O(log N)
+Optional:  C++ + pybind11        — compile once, same O(log N), measurably faster at large N
 ```
 
-Same `NearestNeighborIndex` interface in both cases. The backend is transparent to all callers.
+Same `NearestNeighborIndex` interface in both cases. Backend is transparent to all callers.
+The C++ extension is loaded if present; scipy is used otherwise. No config needed — auto-detected.
+
+### Why provide both?
+
+| | scipy KDTree | Custom C++ + pybind11 |
+|---|---|---|
+| Setup | Zero — always available | Compile once (`cmake && make`) |
+| Correctness | Reference implementation | Must produce identical distances |
+| Performance at N=1000 | Baseline | Measurably compared via benchmark |
+| Interview signal | "I know the algorithm" | "I implemented it in C++ and benchmarked both" |
+| Maintenance | Zero | We own it |
+
+scipy is the **production default** — reliable, no extra deps. The C++ implementation exists to:
+1. Demonstrate deep understanding of the data structure (interview signal)
+2. Provide a concrete performance comparison on real data
+3. Show how to bind C++ to Python via pybind11
 
 ### Benchmarking
 
-A `confidence/benchmark.py` script runs both backends on the same data and prints:
+`confidence/benchmark.py` runs **both backends on identical data** and compares:
+- Build time (index construction)
+- Query time per lookup (single query)
+- Batch query time (all N test embeddings)
+- Result correctness (distances must match to float tolerance)
 
+Example output:
 ```
-Backend       Build (ms)   Query (ms)   N
-------------  ----------   ----------   -----
-C++ KDTree         12.3         0.04    1000
-scipy KDTree       14.1         0.05    1000
-C++ KDTree         89.2         0.06    10000
-scipy KDTree       98.7         0.07    10000
+Benchmark: N_train=1000, dim=128, N_queries=100
+─────────────────────────────────────────────────
+Backend        Build(ms)   Query(ms)   Batch(ms)   Max dist error
+scipy KDTree      14.2        0.051       4.8        —  (reference)
+C++ KDTree        11.8        0.038       3.1        2.4e-6
+─────────────────────────────────────────────────
+Speedup (C++ vs scipy): 1.35x query, 1.55x batch
+All distances match: ✅
 ```
 
-This gives a concrete number to quote in an interview.
+This gives concrete numbers to quote in an interview and verifies correctness of the C++ implementation against scipy as ground truth.
 
 ---
 
-## 3. C++ k-d Tree Implementation
+## 3. C++ k-d Tree Implementation (opt-in)
 
 ### `confidence/kdtree.cpp`
 
@@ -198,35 +208,58 @@ def extract_embedding(simulator: Simulator, graph: Data, device: str) -> np.ndar
 class NearestNeighborIndex:
     """
     Nearest-neighbor index over trajectory embeddings.
-    Uses C++ k-d tree if compiled, scipy.KDTree otherwise.
+    Uses scipy.KDTree by default. Automatically upgrades to C++ backend
+    if confidence/_kdtree.so is present (compile with cmake && make).
     """
-    backend: str          # 'cpp' or 'scipy'
+    backend: str             # 'scipy' (default) or 'cpp' (if compiled)
     embeddings: np.ndarray   # [N_train, 128]
     train_diameter: float    # 95th percentile NN distance among training embeddings
 
     def build(self, embeddings: np.ndarray) -> None:
         self.embeddings = embeddings
-        # Try C++ backend
+
+        # Default: scipy — always available, no setup required
+        from scipy.spatial import KDTree
+        self._scipy_tree = KDTree(embeddings)
+        self.backend = 'scipy'
+
+        # Upgrade to C++ if compiled (opt-in)
         try:
-            from confidence._kdtree import KDTree
-            self._tree = KDTree(embeddings.astype(np.float32))
+            from confidence._kdtree import KDTree as CppKDTree
+            self._cpp_tree = CppKDTree(embeddings.astype(np.float32))
             self.backend = 'cpp'
         except ImportError:
-            from scipy.spatial import KDTree
-            self._tree = KDTree(embeddings)
-            self.backend = 'scipy'
-        # Compute train_diameter (95th percentile of each point's NN distance)
-        dists, _ = self._tree.query(embeddings, k=2)  # k=2: skip self (dist=0)
+            self._cpp_tree = None
+
+        # train_diameter = 95th percentile of each point's NN distance
+        # (k=2 to skip self: distance to itself is 0)
+        dists, _ = self._scipy_tree.query(embeddings, k=2)
         self.train_diameter = float(np.percentile(dists[:, 1], 95))
 
     def query(self, embedding: np.ndarray) -> float:
         """Returns confidence score in [0, 1]."""
-        dist, _ = self._tree.query(embedding.reshape(1, -1), k=1)
-        d_min = float(dist[0])
+        tree = self._cpp_tree if self._cpp_tree is not None else self._scipy_tree
+        dist, _ = tree.query(embedding.reshape(1, -1), k=1)
+        d_min = float(dist[0] if self._cpp_tree else dist[0, 0])
         return float(np.clip(1.0 - d_min / self.train_diameter, 0.0, 1.0))
 
     def save(self, path: str) -> None:
-        import pickle
+        pickle.dump({'embeddings': self.embeddings,
+                     'train_diameter': self.train_diameter}, open(path, 'wb'))
+
+    @classmethod
+    def load(cls, path: str) -> 'NearestNeighborIndex':
+        d = pickle.load(open(path, 'rb'))
+        obj = cls()
+        obj.build(d['embeddings'])   # rebuilds tree; auto-selects best available backend
+        return obj
+```
+
+**`train_diameter`** = 95th percentile of nearest-neighbor distances within the training set.
+Using 95th percentile (not max) prevents one outlier training sample from collapsing all scores.
+
+Note: both `_scipy_tree` and `_cpp_tree` are always built when C++ is available — this allows
+`benchmark.py` to query both on identical data without rebuilding the index.
         pickle.dump({'embeddings': self.embeddings,
                      'train_diameter': self.train_diameter,
                      'backend': self.backend}, open(path, 'wb'))
@@ -360,13 +393,30 @@ Color: green (≥70%), yellow (40–70%), red (<40%). Hidden if `confidence_scor
 
 | Metric | Value |
 |---|---|
-| Index build time | ~30s for 1000 trajectories (one encoder pass each on CPU) |
-| Query time (C++ backend) | <0.1ms |
-| Query time (scipy fallback) | <0.1ms |
+| Index build time | ~30s for 1000 trajectories (one encoder pass on CPU) |
 | Index file size | 1000 × 128 × 4 bytes ≈ 500 KB |
+| Query time | Measured by `benchmark.py` — both backends run on same data |
 
-C++ and scipy have identical complexity O(log N) and near-identical wall time at N=1000.
-The benchmark exists to demonstrate and measure the difference, not to justify C++ on perf grounds.
+Both backends have O(log N) complexity and near-identical wall time at N=1000.
+The benchmark is not about justifying C++ on performance grounds — it is about:
+1. **Verifying correctness**: C++ distances must match scipy to float tolerance
+2. **Measuring the real difference**: concrete numbers to present in an interview
+3. **Showing at what N C++ wins**: benchmark runs at N=100, 1000, 10000
+
+Example benchmark output:
+```
+Benchmark: dim=128
+─────────────────────────────────────────────────────────────────
+N        Backend       Build(ms)   Query(ms)   Batch(ms)   Correct
+100      scipy             1.2        0.041        3.1      —
+100      C++               0.9        0.031        2.3      ✅
+1000     scipy            14.2        0.051        4.8      —
+1000     C++              11.8        0.038        3.1      ✅
+10000    scipy           162.4        0.063       46.2      —
+10000    C++             118.1        0.041       28.7      ✅
+─────────────────────────────────────────────────────────────────
+Correctness: max distance error = 2.4e-6 (float32 precision)
+```
 
 ---
 

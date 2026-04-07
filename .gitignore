@@ -25,6 +25,8 @@ CONTEXT.md
 DEEP_LEARNING_TUTORIAL.md
 OVERVIEW.md
 docs/*
+!docs/superpowers/
+!docs/superpowers/**
 
 # Dataset metadata
 meta.json

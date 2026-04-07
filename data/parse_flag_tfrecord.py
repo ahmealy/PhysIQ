@@ -44,8 +44,29 @@ def _tf_parse(proto, meta):
 
 def load_dataset(split, data_dir=DATA_DIR):
     import tensorflow as tf
-    with open(os.path.join(data_dir, "meta.json")) as fp:
-        meta = json.loads(fp.read())
+    meta_path = os.path.join(data_dir, "meta.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"meta.json not found at {meta_path}\n"
+            "Download flag_simple dataset first:\n"
+            "  bash meshgraphnets/download_dataset.sh flag_simple data_flag"
+        )
+    with open(meta_path) as fp:
+        meta = json.load(fp)
+
+    # Validate required fields are present in this meta.json
+    required = {"world_pos", "mesh_pos", "node_type", "cells"}
+    if "features" in meta:
+        present = set(meta["features"].keys())
+    else:
+        present = set(meta.get("field_names", []))
+    missing = required - present
+    if missing:
+        raise ValueError(
+            f"meta.json at {meta_path} is missing flag_simple fields: {missing}\n"
+            "Ensure you are using the flag_simple dataset's meta.json, not another domain's."
+        )
+
     ds = tf.data.TFRecordDataset(os.path.join(data_dir, split + ".tfrecord"))
     ds = ds.map(functools.partial(_tf_parse, meta=meta), num_parallel_calls=1)
     ds = ds.prefetch(1)
@@ -87,16 +108,22 @@ def parse_split(split: str, data_dir: str = DATA_DIR):
 
     # Save world_pos as ragged (different N per trajectory possible)
     # Use object dtype arrays for ragged storage
+    # Atomic write: write to .tmp files then rename to avoid partial-write corruption
+    pos_path_tmp  = pos_path  + ".tmp"
+    mesh_path_tmp = mesh_path + ".tmp"
+
     np.savez_compressed(
-        pos_path,
+        pos_path_tmp,
         world_pos=np.array(all_world_pos, dtype=object),  # [n_traj] of [T, N, 3]
     )
     np.savez_compressed(
-        mesh_path,
+        mesh_path_tmp,
         mesh_pos=np.array(all_mesh_pos, dtype=object),    # [n_traj] of [N, 2]
         node_type=np.array(all_node_type, dtype=object),  # [n_traj] of [N, 1]
         cells=np.array(all_cells, dtype=object),          # [n_traj] of [F, 3]
     )
+    os.replace(pos_path_tmp,  pos_path)
+    os.replace(mesh_path_tmp, mesh_path)
     print(f"[{split}] Saved to {pos_path} and {mesh_path}")
 
 
@@ -106,8 +133,9 @@ if __name__ == "__main__":
 
     if version.parse(tf.__version__) >= version.parse("1.15"):
         raise RuntimeError(
-            f"TensorFlow {tf.__version__} found. This script requires tensorflow<1.15.\n"
-            "Install in a separate env: pip install 'tensorflow<1.15'"
+            f"TensorFlow {tf.__version__} found. This script requires tensorflow 1.x (< 1.15).\n"
+            "The enable_eager_execution() API is only available in TF 1.x.\n"
+            "Install in a separate env: pip install 'tensorflow==1.14.0'"
         )
 
     os.makedirs(DATA_DIR, exist_ok=True)

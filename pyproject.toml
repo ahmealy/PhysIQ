@@ -92,5 +92,5 @@ addopts     = "-v --tb=short"
 
 [tool.setuptools.packages.find]
 where   = ["."]
-include = ["api*", "model*", "utils*", "dataset*"]
+include = ["api*", "model*", "utils*", "dataset*", "confidence*"]
 exclude = ["venv*", "venv_tf*", "app*", "data*", "checkpoints*", "result*"]

@@ -32,35 +32,52 @@ class FlagDataset(Dataset):
                 f"Flag position data not found: {pos_path}\n"
                 "Re-run: python data/parse_flag_tfrecord.py"
             )
+        if not os.path.exists(mesh_path):
+            raise FileNotFoundError(
+                f"Flag mesh data not found: {mesh_path}\n"
+                "Re-run: python data/parse_flag_tfrecord.py"
+            )
 
-        pos_data  = np.load(pos_path,  allow_pickle=True)
-        mesh_data = np.load(mesh_path, allow_pickle=True)
+        # Keep NpzFile handles open for lazy per-item access
+        self._pos_data  = np.load(pos_path,  allow_pickle=True)
+        self._mesh_data = np.load(mesh_path, allow_pickle=True)
 
-        self.world_pos_list  = pos_data["world_pos"]      # [n_traj] of [T, N, 3]
-        self.mesh_pos_list   = mesh_data["mesh_pos"]      # [n_traj] of [N, 2]
-        self.node_type_list  = mesh_data["node_type"]     # [n_traj] of [N, 1]
-        self.cells_list      = mesh_data["cells"]         # [n_traj] of [F, 3]
+        # Only materialize the object array headers (not the inner float arrays)
+        # to compute trajectory lengths for __len__ and index mapping
+        world_pos_arr = self._pos_data["world_pos"]     # object array: [n_traj] of [T, N, 3]
+        self.mesh_pos_list   = self._mesh_data["mesh_pos"]    # [n_traj] of [N, 2]
+        self.node_type_list  = self._mesh_data["node_type"]   # [n_traj] of [N, 1]
+        self.cells_list      = self._mesh_data["cells"]       # [n_traj] of [F, 3]
 
-        self.n_traj = len(self.world_pos_list)
+        self.n_traj = len(world_pos_arr)
         # Each trajectory has T-1 timestep pairs (t, t+1)
-        self.steps_per_traj = [arr.shape[0] - 1 for arr in self.world_pos_list]
+        self.steps_per_traj = [arr.shape[0] - 1 for arr in world_pos_arr]
         self.total_samples = sum(self.steps_per_traj)
+
+        bad_trajs = [i for i, s in enumerate(self.steps_per_traj) if s < 1]
+        if bad_trajs:
+            raise ValueError(
+                f"Trajectories {bad_trajs} have fewer than 2 timesteps (T < 2). "
+                "Data may be corrupted. Re-run parse_flag_tfrecord.py."
+            )
 
         # Cumulative step counts for index mapping
         self._cum_steps = np.cumsum([0] + self.steps_per_traj)
+
+        # Store the object array for lazy per-trajectory access in __getitem__
+        self._world_pos_arr = world_pos_arr
 
     def __len__(self) -> int:
         return self.total_samples
 
     def __getitem__(self, index: int) -> Data:
-        # Find which trajectory and which timestep
         traj_idx = int(np.searchsorted(self._cum_steps[1:], index, side="right"))
-        t = index - self._cum_steps[traj_idx]  # local timestep within trajectory
+        t = index - self._cum_steps[traj_idx]
 
-        world_pos  = self.world_pos_list[traj_idx]    # [T, N, 3]
-        mesh_pos   = self.mesh_pos_list[traj_idx]     # [N, 2]
-        node_type  = self.node_type_list[traj_idx]    # [N, 1]
-        cells      = self.cells_list[traj_idx]        # [F, 3]
+        world_pos  = self._world_pos_arr[traj_idx]      # [T, N, 3] — accessed lazily
+        mesh_pos   = self.mesh_pos_list[traj_idx]        # [N, 2]
+        node_type  = self.node_type_list[traj_idx]       # [N, 1]
+        cells      = self.cells_list[traj_idx]           # [F, 3]
 
         # Arrays extracted from a numpy object array retain dtype=object; cast explicitly.
         world_pos_t    = np.asarray(world_pos[t],     dtype=np.float32)   # [N, 3]

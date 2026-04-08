@@ -77,6 +77,13 @@ if __name__ == '__main__':
         
         fp = np.memmap(filename, dtype='float32', mode='w+', shape=(shape0, shape1, 2))
 
+        pressure_filename = os.path.join(tf_datasetPath, split + '_pressure.dat')
+        if not os.path.exists(pressure_filename):
+            fp_pressure = np.memmap(pressure_filename, dtype='float32', mode='w+',
+                                    shape=(shape0, shape1, 1))
+        else:
+            fp_pressure = None  # Already exists — skip
+
         write_shift  = 0
         for index, d in enumerate(ds):
             pos_ = d['mesh_pos'].numpy()
@@ -101,9 +108,20 @@ if __name__ == '__main__':
             fp[write_shift:write_shift+velocity.shape[0]] = velocity
 
             fp.flush()
+
+            if fp_pressure is not None:
+                pressure = d['pressure'].numpy()         # [T, N, 1]
+                pressure = pressure.transpose(1, 0, 2)  # [N, T, 1]
+                fp_pressure[write_shift:write_shift+pressure.shape[0]] = pressure
+                fp_pressure.flush()
+                del pressure
+
             write_shift += velocity.shape[0]
             del velocity
         del fp
+
+        if fp_pressure is not None:
+            del fp_pressure
 
         indices = [i.shape[0] for i in all_pos]
         indices = np.cumsum(indices)
@@ -123,5 +141,6 @@ if __name__ == '__main__':
                             cells=all_cells,
                             indices=indices,
                             cindices=cindices,
-                            all_velocity_shape=(shape0, shape1, 2)
+                            all_velocity_shape=(shape0, shape1, 2),
+                            all_pressure_shape=(shape0, shape1, 1)
         )

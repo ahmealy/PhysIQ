@@ -366,8 +366,8 @@ export const Predict: React.FC = () => {
                 {domain && (
                   <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                     domain === "flag_simple"
-                      ? "bg-purple-100 text-purple-800"
-                      : "bg-blue-100 text-blue-800"
+                      ? "bg-purple-500/20 text-purple-400"
+                      : "bg-blue-500/20 text-blue-400"
                   }`}>
                     {domain === "flag_simple" ? "CLOTH MODEL" : "CFD MODEL"}
                   </span>

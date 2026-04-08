@@ -410,7 +410,7 @@ export const Visualize: React.FC = () => {
                 colorScale={d3.scaleSequential(d3.interpolateReds).domain([0, 0.1])}
               />
               <div className="absolute top-12 left-4 bg-slate-950/80 p-2 rounded border border-red-500/30 text-[10px]">
-                📍 Max Error: {maxErrorVal.toFixed(4)} at ({maxErrorPos[0].toFixed(2)}, {maxErrorPos[1].toFixed(2)})
+                📍 Max Error: {maxErrorVal.toFixed(4)} {errorUnit} at ({maxErrorPos[0].toFixed(2)}, {maxErrorPos[1].toFixed(2)})
               </div>
             </div>
           </section>
@@ -419,6 +419,13 @@ export const Visualize: React.FC = () => {
 
       {activeTab === 'physics' && (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
+          {metadata?.domain === 'flag_simple' ? (
+            <div className="text-center py-12 text-slate-400">
+              <p className="text-lg mb-2">Physics analysis not available for cloth simulation</p>
+              <p className="text-sm">Vorticity and energy conservation metrics apply to CFD (cylinder flow) only.</p>
+            </div>
+          ) : (
+          <>
           {isLoadingPhysics ? (
             <div className="p-12 text-center text-slate-500">Computing physics metrics...</div>
           ) : physicsData && (
@@ -503,6 +510,8 @@ export const Visualize: React.FC = () => {
                 </section>
               </div>
             </>
+          )}
+          </>
           )}
         </div>
       )}

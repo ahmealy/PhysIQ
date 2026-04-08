@@ -16,7 +16,7 @@ pybind11_add_module(_kdtree
     kdtree_bind.cpp
 )
 
-target_compile_options(_kdtree PRIVATE -O3 -march=native)
+target_compile_options(_kdtree PRIVATE -O3)
 
 # Output the .so file directly into the confidence/ directory
 set_target_properties(_kdtree PROPERTIES

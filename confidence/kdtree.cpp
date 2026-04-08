@@ -36,8 +36,9 @@ struct KDTreeImpl {
     int pool_pos = 0;
 
     KDNode* alloc_node() {
+        // pool is pre-sized to 2*n+1 in kdtree_build; this will never resize.
         if (pool_pos >= (int)pool.size()) {
-            pool.resize(pool.size() == 0 ? 1 : pool.size() * 2);
+            throw std::runtime_error("kdtree pool overflow — this should not happen");
         }
         KDNode* node = &pool[pool_pos++];
         node->left = node->right = nullptr;
@@ -112,7 +113,7 @@ KDTree* kdtree_build(const float* data, int n, int dim) {
     impl->n    = n;
     impl->dim  = dim;
     impl->data.assign(data, data + n * dim);
-    impl->pool.reserve(2 * n);   // pre-allocate node pool
+    impl->pool.resize(2 * n + 1);   // pre-size: k-d tree on N points has ≤ 2N-1 nodes; resize once, never again (no pointer invalidation)
 
     std::vector<int> indices(n);
     std::iota(indices.begin(), indices.end(), 0);

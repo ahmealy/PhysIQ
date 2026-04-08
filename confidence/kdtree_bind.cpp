@@ -36,7 +36,13 @@ public:
         int /*k*/ = 1)
     {
         auto buf = point.request();
-        // Accept either [dim] or [1, dim]
+        // Validate total element count matches dim_
+        int total = 1;
+        for (auto s : buf.shape) total *= static_cast<int>(s);
+        if (total != dim_)
+            throw std::runtime_error(
+                "query point has wrong dimension: expected " + std::to_string(dim_) +
+                ", got " + std::to_string(total));
         const float* ptr = static_cast<const float*>(buf.ptr);
         int best_idx = -1;
         float dist = kdtree_query_nn(tree_, ptr, &best_idx);

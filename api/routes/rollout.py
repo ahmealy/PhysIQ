@@ -62,6 +62,18 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     It puts a message onto the asyncio queue using loop.call_soon_threadsafe.
     """
     model = get_model(cfg["checkpoint"], device)
+
+    # Read target_field from checkpoint to determine which slice to swap
+    target_field = "velocity"
+    ckpt_path = cfg["checkpoint"]
+    if os.path.exists(ckpt_path):
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            target_field = ckpt.get("target_field", "velocity")
+        except Exception:
+            pass
+    field_slice = slice(1, 2) if target_field == "pressure" else slice(1, 3)
+
     dataset = _get_dataset(cfg["data_dir"], req.split)
 
     n_traj = len(dataset) // dataset.num_sampes_per_tra
@@ -98,7 +110,7 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
                 boundary_mask = torch.logical_not(fluid)
 
             if predicted_velocity is not None:
-                graph.x[:, 1:3] = predicted_velocity.detach()
+                graph.x[:, field_slice] = predicted_velocity.detach()
 
             next_v = graph.y
             predicted_velocity = model(graph, velocity_sequence_noise=None)
@@ -178,8 +190,11 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/result%d.pkl" % req.trajectory_index
     with open(pkl_path, "wb") as f:
-        pickle.dump([[predicted_arr, targets_arr], crds,
-                     {"domain": req.domain, "confidence_score": confidence_score}], f)
+        pickle.dump([[predicted_arr, targets_arr], crds, {
+            "domain":           req.domain,
+            "target_field":     target_field,
+            "confidence_score": confidence_score,
+        }], f)
 
     return {
         "elapsed_seconds":  round(elapsed, 3),
@@ -269,8 +284,11 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/flag_result%d.pkl" % req.trajectory_index
     with open(pkl_path, "wb") as f:
-        pickle.dump([[predicted_arr, targets_arr], mesh_pos,
-                     {"domain": "flag_simple", "confidence_score": confidence_score}], f)
+        pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
+            "domain":           "flag_simple",
+            "target_field":     "velocity",
+            "confidence_score": confidence_score,
+        }], f)
 
     return {
         "elapsed_seconds": round(elapsed, 3),

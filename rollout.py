@@ -12,6 +12,8 @@ from tqdm import tqdm
 from dataset import FpcDataset
 from model.simulator import Simulator
 from utils.utils import NodeType
+from model.flag_simulator import FlagSimulator
+from dataset.flag_dataset import FlagDataset
 
 
 def rollout_error(predicteds, targets, rollout_index=0, save_dir='result'):
@@ -122,6 +124,62 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
     return result, crds, elapsed
 
 
+@torch.no_grad()
+def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
+    """
+    Autoregressive rollout for cloth (flag_simple) using Verlet integration.
+    Saves result to result/flag_result{rollout_index}.pkl
+    """
+    from utils.utils import NodeType
+    steps_per_traj = dataset.steps_per_traj[rollout_index]
+    predicteds = []
+    targets_list = []
+    prev_world = None
+    cur_world  = None
+
+    t_start = time.perf_counter()
+
+    for i in tqdm(range(steps_per_traj), desc="Rollout cloth trajectory %d" % rollout_index):
+        cum = dataset._cum_steps
+        idx = int(cum[rollout_index]) + i
+        graph = dataset[idx]
+        graph = graph.to(device)
+
+        if cur_world is not None:
+            graph.world_pos = cur_world.detach()
+            graph.x[:, :3]  = cur_world.detach()
+            graph.prev_x    = prev_world.detach()
+
+        prev_world = graph.world_pos.clone()
+        next_world = model(graph)   # [N, 3]
+
+        # Pin HANDLE nodes to ground truth
+        node_type = graph.x[:, 3].long()
+        handle_mask = (node_type == NodeType.HANDLE)
+        next_world[handle_mask] = graph.y[handle_mask]
+
+        predicteds.append(next_world.detach().cpu().numpy())
+        targets_list.append(graph.y.detach().cpu().numpy())
+        cur_world = next_world
+
+    elapsed = time.perf_counter() - t_start
+    predicted_arr = np.stack(predicteds)    # [T, N, 3]
+    targets_arr   = np.stack(targets_list)  # [T, N, 3]
+
+    sq = np.square(predicted_arr - targets_arr).reshape(steps_per_traj, -1)
+    per_step_rmse = np.sqrt(np.mean(sq, axis=1))
+    for step in range(0, steps_per_traj, 50):
+        print("rollout position rmse @ step %d: %.2e" % (step, per_step_rmse[step]))
+
+    mesh_pos = dataset.mesh_pos_list[rollout_index]
+    os.makedirs("result", exist_ok=True)
+    pkl_path = "result/flag_result%d.pkl" % rollout_index
+    with open(pkl_path, "wb") as f:
+        pickle.dump([[predicted_arr, targets_arr], mesh_pos, {"domain": "flag_simple"}], f)
+    print("Result saved to %s" % pkl_path)
+    return [predicted_arr, targets_arr], mesh_pos, elapsed
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='MeshGraphNets rollout and evaluation')
@@ -129,48 +187,60 @@ if __name__ == '__main__':
     parser.add_argument('--model_dir',  type=str,   default='checkpoints/best_model.pth')
     parser.add_argument('--test_split', type=str,   default='test')
     parser.add_argument('--rollout_num', type=int,  default=1)
+    parser.add_argument('--domain', type=str, default='cylinder_flow',
+                        choices=['cylinder_flow', 'flag_simple'])
     args = parser.parse_args()
 
     device = 'cuda:%d' % args.gpu if torch.cuda.is_available() else 'cpu'
     torch.cuda.set_device(args.gpu) if torch.cuda.is_available() else None
 
-    # Load model
-    simulator = Simulator(
-        message_passing_num=15,
-        node_input_size=11,
-        edge_input_size=3,
-        device=device
-    )
-    state_dict = torch.load(args.model_dir, map_location=device, weights_only=False)
-    simulator.load_state_dict(state_dict['model_state_dict'])
-    simulator.eval()
-    print('Model loaded from %s (epoch %d, valid loss %.2e)' % (
-        args.model_dir, state_dict['epoch'], state_dict['valid_loss']
-    ))
-
-    # Prepare dataset and transforms
-    transformer = T.Compose([
-        T.FaceToEdge(),
-        T.Cartesian(norm=False),
-        T.Distance(norm=False)
-    ])
-    dataset = FpcDataset('data', split=args.test_split)
-    print('Dataset: %d trajectories x %d steps' % (
-        len(dataset) // dataset.num_sampes_per_tra, dataset.num_sampes_per_tra
-    ))
-
-    # Run rollouts
-    for i in range(args.rollout_num):
-        print('\n' + '='*60)
-        result, crds, elapsed = rollout(simulator, dataset, transformer,
-                                        rollout_index=i, device=device)
-        n_steps = result[0].shape[0]
-        sim_time = n_steps * 0.01   # dt = 0.01s per step
-        print('\nInference: %d steps in %.2fs  (%.1fx faster than real-time sim)' % (
-            n_steps, elapsed, sim_time / elapsed
+    if args.domain == 'flag_simple':
+        model = FlagSimulator(message_passing_num=15, device=device)
+        ckpt = torch.load(args.model_dir, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        model.eval()
+        dataset = FlagDataset('data_flag', split=args.test_split)
+        for i in range(args.rollout_num):
+            rollout_cloth(model, dataset, rollout_index=i, device=device)
+    else:
+        # existing CFD code
+        # Load model
+        simulator = Simulator(
+            message_passing_num=15,
+            node_input_size=11,
+            edge_input_size=3,
+            device=device
+        )
+        state_dict = torch.load(args.model_dir, map_location=device, weights_only=False)
+        simulator.load_state_dict(state_dict['model_state_dict'])
+        simulator.eval()
+        print('Model loaded from %s (epoch %d, valid loss %.2e)' % (
+            args.model_dir, state_dict['epoch'], state_dict['valid_loss']
         ))
-        print('='*60)
-        rollout_error(result[0], result[1], rollout_index=i)
+
+        # Prepare dataset and transforms
+        transformer = T.Compose([
+            T.FaceToEdge(),
+            T.Cartesian(norm=False),
+            T.Distance(norm=False)
+        ])
+        dataset = FpcDataset('data', split=args.test_split)
+        print('Dataset: %d trajectories x %d steps' % (
+            len(dataset) // dataset.num_sampes_per_tra, dataset.num_sampes_per_tra
+        ))
+
+        # Run rollouts
+        for i in range(args.rollout_num):
+            print('\n' + '='*60)
+            result, crds, elapsed = rollout(simulator, dataset, transformer,
+                                            rollout_index=i, device=device)
+            n_steps = result[0].shape[0]
+            sim_time = n_steps * 0.01   # dt = 0.01s per step
+            print('\nInference: %d steps in %.2fs  (%.1fx faster than real-time sim)' % (
+                n_steps, elapsed, sim_time / elapsed
+            ))
+            print('='*60)
+            rollout_error(result[0], result[1], rollout_index=i)
 
 
     

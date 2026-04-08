@@ -55,6 +55,16 @@ export const Visualize: React.FC = () => {
   const maxErrorVal = currentFrame && maxErrorIdx !== -1 ? currentFrame.error[maxErrorIdx] : 0;
   const maxErrorPos = metadata && maxErrorIdx !== -1 ? metadata.crds[maxErrorIdx] : [0, 0];
 
+  const fieldLabel = metadata?.domain === "flag_simple"
+    ? "Position Magnitude (m)"
+    : "Velocity Magnitude (m/s)";
+
+  const errorLabel = metadata?.domain === "flag_simple"
+    ? "Position Error (m)"
+    : "Velocity Error (m/s)";
+
+  const errorUnit = metadata?.domain === "flag_simple" ? "m" : "m/s";
+
   const overfittingStatus = () => {
     // If we have actual training epoch data, use it
     if (trainEpochs.length >= 3) {
@@ -153,17 +163,17 @@ export const Visualize: React.FC = () => {
         <>
           {/* Mesh Visualization Grid */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 h-[400px]">
-        <MeshPlot 
-          crds={metadata.crds} 
-          triangles={metadata.triangles} 
-          values={currentFrame.target_magnitude} 
-          title="Ground Truth (Solver)"
+        <MeshPlot
+          crds={metadata.crds}
+          triangles={metadata.triangles}
+          values={currentFrame.target_magnitude}
+          title={`Ground Truth — ${fieldLabel}`}
         />
-        <MeshPlot 
-          crds={metadata.crds} 
-          triangles={metadata.triangles} 
-          values={currentFrame.predicted_magnitude} 
-          title="Prediction (MeshGraphNet)"
+        <MeshPlot
+          crds={metadata.crds}
+          triangles={metadata.triangles}
+          values={currentFrame.predicted_magnitude}
+          title={`Prediction — ${fieldLabel}`}
         />
         <MeshPlot 
           crds={metadata.crds} 
@@ -382,8 +392,8 @@ export const Visualize: React.FC = () => {
               <h3 className="font-semibold text-white">Error Heatmap & Hotspot Analysis</h3>
               <div className="flex items-center gap-4">
                 <div className="text-right">
-                  <p className="text-[10px] text-slate-500 font-bold uppercase">Max Error</p>
-                  <p className="text-sm font-bold text-red-400">{maxErrorVal.toFixed(6)} m/s</p>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase">{errorLabel}</p>
+                  <p className="text-sm font-bold text-red-400">{maxErrorVal.toFixed(6)} {errorUnit}</p>
                 </div>
                 <div className="text-right">
                   <p className="text-[10px] text-slate-500 font-bold uppercase">Node Index</p>

@@ -363,6 +363,15 @@ export const Predict: React.FC = () => {
               <div className="flex items-center gap-2 text-green-400">
                 <CheckCircle2 className="w-5 h-5" />
                 <span className="font-bold uppercase tracking-wider text-xs">Rollout Complete</span>
+                {domain && (
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                    domain === "flag_simple"
+                      ? "bg-purple-100 text-purple-800"
+                      : "bg-blue-100 text-blue-800"
+                  }`}>
+                    {domain === "flag_simple" ? "CLOTH MODEL" : "CFD MODEL"}
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>

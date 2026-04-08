@@ -63,15 +63,8 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     """
     model = get_model(cfg["checkpoint"], device)
 
-    # Read target_field from checkpoint to determine which slice to swap
-    target_field = "velocity"
-    ckpt_path = cfg["checkpoint"]
-    if os.path.exists(ckpt_path):
-        try:
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            target_field = ckpt.get("target_field", "velocity")
-        except Exception:
-            pass
+    # Read target_field from the already-loaded model (authoritative, avoids second torch.load)
+    target_field = getattr(model, "target_field", "velocity")
     field_slice = slice(1, 2) if target_field == "pressure" else slice(1, 3)
 
     dataset = _get_dataset(cfg["data_dir"], req.split)

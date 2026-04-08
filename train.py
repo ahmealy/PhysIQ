@@ -9,9 +9,6 @@ import torch_geometric.transforms as T
 from torch_geometric.loader import DataLoader
 import numpy as np
 from dataset import FpcDataset
-from model.simulator import Simulator
-from utils.noise import get_velocity_noise
-from utils.utils import NodeType
 import os
 import json
 import argparse
@@ -20,6 +17,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 
 # ── Config: defaults, overridable via --config JSON (used by UI) ──────────────
 _defaults = dict(
+    domain                   = 'cylinder_flow',
     dataset_dir              = 'data',
     batch_size               = 20,
     noise_std                = 2e-2,
@@ -29,6 +27,10 @@ _defaults = dict(
     message_passing_num      = 15,
     checkpoint_dir           = 'checkpoints',
     log_dir                  = 'runs',
+    # Derived from domain if not provided:
+    output_size              = None,   # 2 = velocity, 1 = pressure, 3 = cloth
+    node_input_size          = None,   # 11 = CFD velocity, 12 = cloth
+    edge_input_size          = None,   # 3 = CFD, 7 = cloth
 )
 
 parser = argparse.ArgumentParser()
@@ -40,6 +42,24 @@ cfg = dict(_defaults)
 if args.config and os.path.exists(args.config):
     with open(args.config) as f:
         cfg.update(json.load(f))
+
+# ── Domain defaults ────────────────────────────────────────────────────────────
+_DOMAIN_DEFAULTS = {
+    'cylinder_flow': dict(output_size=2, node_input_size=11, edge_input_size=3),
+    'flag_simple':   dict(output_size=3, node_input_size=12, edge_input_size=7),
+}
+domain = cfg['domain']
+if domain not in _DOMAIN_DEFAULTS:
+    raise ValueError("Unknown domain: %s. Valid: cylinder_flow, flag_simple" % domain)
+
+# Fill in derived sizes if not explicitly provided
+for key, val in _DOMAIN_DEFAULTS[domain].items():
+    if cfg.get(key) is None:
+        cfg[key] = val
+
+output_size     = cfg['output_size']
+node_input_size = cfg['node_input_size']
+edge_input_size = cfg['edge_input_size']
 
 dataset_dir             = cfg['dataset_dir']
 batch_size              = cfg['batch_size']
@@ -54,25 +74,32 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 
 # 初始化模型与优化器
-simulator = Simulator(
-    message_passing_num=cfg['message_passing_num'],
-    node_input_size=11,
-    edge_input_size=3,
-    device=device
-)
+if domain == 'flag_simple':
+    from model.flag_simulator import FlagSimulator
+    simulator = FlagSimulator(
+        message_passing_num=cfg['message_passing_num'],
+        device=device
+    )
+    transformer = None  # FlagSimulator builds edges internally
+else:
+    from model.simulator import Simulator
+    simulator = Simulator(
+        message_passing_num=cfg['message_passing_num'],
+        node_input_size=node_input_size,
+        edge_input_size=edge_input_size,
+        device=device
+    )
+    transformer = T.Compose([
+        T.FaceToEdge(),
+        T.Cartesian(norm=False),
+        T.Distance(norm=False)
+    ])
+
 optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg['lr'])
 print('Optimizer initialized')
 
-
 # TensorBoard writer
 writer = SummaryWriter(log_dir=log_dir)
-
-# 数据预处理
-transformer = T.Compose([
-    T.FaceToEdge(),
-    T.Cartesian(norm=False),
-    T.Distance(norm=False)
-])
 
 def load_checkpoint(checkpoint_path, model, optimizer, device):
     """Resume training from a saved checkpoint."""
@@ -87,20 +114,30 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
     print(f'Resumed from epoch {ckpt["epoch"]} with valid loss {best_valid_loss:.2e}')
     return start_epoch, best_valid_loss
 
-def train_one_epoch(model: Simulator, dataloader, optimizer, transformer, device, noise_std):
+def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain):
     model.train()
     total_loss = 0.0
     num_batches = 0
 
     for graph in tqdm.tqdm(dataloader):
-        graph = transformer(graph)
+        if transformer is not None:
+            graph = transformer(graph)
         graph = graph.to(device)
 
-        node_type = graph.x[:, 0]  # "node_type, cur_v"
-        velocity_sequence_noise = get_velocity_noise(graph, noise_std=noise_std, device=device)
-        predicted_acc, target_acc = model(graph, velocity_sequence_noise)
+        if domain == 'flag_simple':
+            predicted_acc, target_acc = model(graph)
+            # Cloth: loss on NORMAL nodes only
+            from utils.utils import NodeType
+            node_type = graph.x[:, 3].long()
+            mask = (node_type == NodeType.NORMAL)
+        else:
+            from utils.noise import get_velocity_noise
+            from utils.utils import NodeType
+            velocity_sequence_noise = get_velocity_noise(graph, noise_std=noise_std, device=device)
+            predicted_acc, target_acc = model(graph, velocity_sequence_noise)
+            node_type = graph.x[:, 0]
+            mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)
 
-        mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)
         errors = ((predicted_acc - target_acc) ** 2)[mask]
         loss = torch.mean(errors)
 
@@ -114,20 +151,30 @@ def train_one_epoch(model: Simulator, dataloader, optimizer, transformer, device
     return total_loss / num_batches
 
 
-def evaluate(model: Simulator, dataloader, transformer, device):
+def evaluate(model, dataloader, transformer, device, domain):
     model.eval()
     losses = []
 
     with torch.no_grad():
         for graph in dataloader:
-            graph = transformer(graph)
+            if transformer is not None:
+                graph = transformer(graph)
             graph = graph.to(device)
 
-            node_type = graph.x[:, 0]
-            predicted_velocity = model(graph, None)
+            if domain == 'flag_simple':
+                from utils.utils import NodeType
+                # In eval mode, FlagSimulator returns next_world_pos
+                next_world_pos = model(graph)
+                node_type = graph.x[:, 3].long()
+                mask = (node_type == NodeType.NORMAL)
+                errors = ((next_world_pos - graph.y) ** 2)[mask]
+            else:
+                from utils.utils import NodeType
+                predicted_velocity = model(graph, None)
+                node_type = graph.x[:, 0]
+                mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)
+                errors = ((predicted_velocity - graph.y) ** 2)[mask]
 
-            mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)
-            errors = ((predicted_velocity - graph.y) ** 2)[mask]
             loss = torch.sqrt(torch.mean(errors))
             losses.append(loss.item())
 
@@ -136,8 +183,13 @@ def evaluate(model: Simulator, dataloader, transformer, device):
 
 if __name__ == '__main__':
     # 加载训练和验证数据集
-    train_dataset = FpcDataset(data_root=dataset_dir, split='train')
-    valid_dataset = FpcDataset(data_root=dataset_dir, split='valid')
+    if domain == 'flag_simple':
+        from dataset.flag_dataset import FlagDataset
+        train_dataset = FlagDataset(data_root=cfg['dataset_dir'], split='train')
+        valid_dataset = FlagDataset(data_root=cfg['dataset_dir'], split='valid')
+    else:
+        train_dataset = FpcDataset(data_root=dataset_dir, split='train')
+        valid_dataset = FpcDataset(data_root=dataset_dir, split='valid')
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=2, pin_memory=False)
@@ -154,8 +206,8 @@ if __name__ == '__main__':
 
     for epoch in range(start_epoch, num_epochs + 1):
 
-        train_loss = train_one_epoch(simulator, train_loader, optimizer, transformer, device, noise_std)
-        valid_loss = evaluate(simulator, valid_loader, transformer, device)
+        train_loss = train_one_epoch(simulator, train_loader, optimizer, transformer, device, noise_std, domain)
+        valid_loss = evaluate(simulator, valid_loader, transformer, device, domain)
 
         print(f"Epoch {epoch}/{num_epochs} Train Loss: {train_loss:.2e} Valid Loss: {valid_loss:.2e}")
 
@@ -169,10 +221,14 @@ if __name__ == '__main__':
             best_epoch = epoch
             epochs_no_improve = 0
             torch.save({
-                'epoch': epoch,
-                'model_state_dict': simulator.state_dict(),
+                'epoch':                epoch,
+                'model_state_dict':     simulator.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'valid_loss': valid_loss,
+                'valid_loss':           valid_loss,
+                'domain':               domain,
+                'output_size':          output_size,
+                'node_input_size':      node_input_size,
+                'edge_input_size':      edge_input_size,
             }, checkpoint_path)
             print(f"  -> New best model saved at epoch {epoch} with valid loss {valid_loss:.2e}")
         else:

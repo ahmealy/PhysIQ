@@ -5,6 +5,7 @@ Single module so all routers share the same objects without circular imports.
 
 import os
 import subprocess
+import threading
 from typing import Optional
 import torch
 
@@ -46,38 +47,44 @@ def get_orphan_pid() -> Optional[int]:
 # ── Loaded model cache ────────────────────────────────────────────────────────
 # Keyed by (checkpoint_path, device) so we reload only when needed
 _model_cache: dict = {}
+_model_cache_lock = threading.Lock()
 
 
 def get_model(checkpoint_path: str, device: str):
     """
     Load and cache the correct Simulator based on checkpoint metadata.
-    Reads domain from checkpoint to select simulator class.
+    Thread-safe via double-checked locking.
     """
     key = (checkpoint_path, device)
-    if key not in _model_cache:
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        domain = ckpt.get("domain", "cylinder_flow")
+    # Fast path — no lock needed if already cached
+    if key in _model_cache:
+        return _model_cache[key]
+    with _model_cache_lock:
+        # Second check inside the lock (another thread may have populated it)
+        if key not in _model_cache:
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            domain = ckpt.get("domain", "cylinder_flow")
 
-        if domain == "flag_simple":
-            from model.flag_simulator import FlagSimulator
-            sim = FlagSimulator(
-                message_passing_num=15,
-                device=device,
-            )
-        else:
-            from model.simulator import Simulator
-            node_input_size = ckpt.get("node_input_size", 11)
-            edge_input_size = ckpt.get("edge_input_size", 3)
-            sim = Simulator(
-                message_passing_num=15,
-                node_input_size=node_input_size,
-                edge_input_size=edge_input_size,
-                device=device,
-            )
+            if domain == "flag_simple":
+                from model.flag_simulator import FlagSimulator
+                sim = FlagSimulator(
+                    message_passing_num=15,
+                    device=device,
+                )
+            else:
+                from model.simulator import Simulator
+                node_input_size = ckpt.get("node_input_size", 11)
+                edge_input_size = ckpt.get("edge_input_size", 3)
+                sim = Simulator(
+                    message_passing_num=15,
+                    node_input_size=node_input_size,
+                    edge_input_size=edge_input_size,
+                    device=device,
+                )
 
-        sim.load_state_dict(ckpt["model_state_dict"])
-        sim.eval()
-        _model_cache[key] = sim
+            sim.load_state_dict(ckpt["model_state_dict"])
+            sim.eval()
+            _model_cache[key] = sim
     return _model_cache[key]
 
 

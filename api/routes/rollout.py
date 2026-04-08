@@ -197,7 +197,7 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
 
             if cur_world is not None:
                 graph.world_pos = cur_world.detach()
-                graph.x[:, :3]  = cur_world.detach()
+                graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
                 graph.prev_x    = prev_world.detach()
 
             prev_world = graph.world_pos.clone()
@@ -278,7 +278,7 @@ async def run_rollout(req: RolloutRequest):
     async def generate() -> AsyncGenerator[str, None]:
         try:
             # Kick off the blocking inference in a thread
-            run_fn = _run_cloth_rollout_sync if getattr(req, 'domain', 'cylinder_flow') == 'flag_simple' else _run_rollout_sync
+            run_fn = _run_cloth_rollout_sync if req.domain == 'flag_simple' else _run_rollout_sync
             future = loop.run_in_executor(
                 None,
                 run_fn,

@@ -130,7 +130,6 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
     Autoregressive rollout for cloth (flag_simple) using Verlet integration.
     Saves result to result/flag_result{rollout_index}.pkl
     """
-    from utils.utils import NodeType
     steps_per_traj = dataset.steps_per_traj[rollout_index]
     predicteds = []
     targets_list = []
@@ -147,7 +146,7 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
 
         if cur_world is not None:
             graph.world_pos = cur_world.detach()
-            graph.x[:, :3]  = cur_world.detach()
+            graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
             graph.prev_x    = prev_world.detach()
 
         prev_world = graph.world_pos.clone()
@@ -171,7 +170,7 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
     for step in range(0, steps_per_traj, 50):
         print("rollout position rmse @ step %d: %.2e" % (step, per_step_rmse[step]))
 
-    mesh_pos = dataset.mesh_pos_list[rollout_index]
+    mesh_pos = np.asarray(dataset.mesh_pos_list[rollout_index], dtype=np.float32)
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/flag_result%d.pkl" % rollout_index
     with open(pkl_path, "wb") as f:

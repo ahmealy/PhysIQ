@@ -14,6 +14,7 @@ import json
 import argparse
 import tqdm
 from torch.utils.tensorboard.writer import SummaryWriter
+from utils.utils import NodeType
 
 # ── Config: defaults, overridable via --config JSON (used by UI) ──────────────
 _defaults = dict(
@@ -28,7 +29,7 @@ _defaults = dict(
     checkpoint_dir           = 'checkpoints',
     log_dir                  = 'runs',
     # Derived from domain if not provided:
-    output_size              = None,   # 2 = velocity, 1 = pressure, 3 = cloth
+    output_size              = None,   # set automatically from domain: 2 (cylinder_flow) or 3 (flag_simple)
     node_input_size          = None,   # 11 = CFD velocity, 12 = cloth
     edge_input_size          = None,   # 3 = CFD, 7 = cloth
 )
@@ -50,7 +51,7 @@ _DOMAIN_DEFAULTS = {
 }
 domain = cfg['domain']
 if domain not in _DOMAIN_DEFAULTS:
-    raise ValueError("Unknown domain: %s. Valid: cylinder_flow, flag_simple" % domain)
+    raise ValueError(f"Unknown domain '{domain}'. Valid: {list(_DOMAIN_DEFAULTS)}")
 
 # Fill in derived sizes if not explicitly provided
 for key, val in _DOMAIN_DEFAULTS[domain].items():
@@ -107,6 +108,12 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
         print('No checkpoint found, starting from scratch.')
         return 1, float('inf')
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt_domain = ckpt.get('domain', 'cylinder_flow')  # old checkpoints default to cfd
+    if ckpt_domain != domain:
+        raise RuntimeError(
+            f"Checkpoint domain '{ckpt_domain}' does not match current domain '{domain}'. "
+            "Delete the checkpoint or update --config to match the checkpoint domain."
+        )
     model.load_state_dict(ckpt['model_state_dict'])
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     start_epoch = ckpt['epoch'] + 1
@@ -127,12 +134,10 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
         if domain == 'flag_simple':
             predicted_acc, target_acc = model(graph)
             # Cloth: loss on NORMAL nodes only
-            from utils.utils import NodeType
             node_type = graph.x[:, 3].long()
             mask = (node_type == NodeType.NORMAL)
         else:
             from utils.noise import get_velocity_noise
-            from utils.utils import NodeType
             velocity_sequence_noise = get_velocity_noise(graph, noise_std=noise_std, device=device)
             predicted_acc, target_acc = model(graph, velocity_sequence_noise)
             node_type = graph.x[:, 0]
@@ -162,14 +167,12 @@ def evaluate(model, dataloader, transformer, device, domain):
             graph = graph.to(device)
 
             if domain == 'flag_simple':
-                from utils.utils import NodeType
                 # In eval mode, FlagSimulator returns next_world_pos
                 next_world_pos = model(graph)
                 node_type = graph.x[:, 3].long()
                 mask = (node_type == NodeType.NORMAL)
                 errors = ((next_world_pos - graph.y) ** 2)[mask]
             else:
-                from utils.utils import NodeType
                 predicted_velocity = model(graph, None)
                 node_type = graph.x[:, 0]
                 mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)

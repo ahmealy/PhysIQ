@@ -75,11 +75,13 @@ def get_model(checkpoint_path: str, device: str):
                 from model.simulator import Simulator
                 node_input_size = ckpt.get("node_input_size", 11)
                 edge_input_size = ckpt.get("edge_input_size", 3)
+                target_field = ckpt.get("target_field", "velocity")
                 sim = Simulator(
                     message_passing_num=15,
                     node_input_size=node_input_size,
                     edge_input_size=edge_input_size,
                     device=device,
+                    target_field=target_field,
                 )
 
             sim.load_state_dict(ckpt["model_state_dict"])
@@ -96,15 +98,16 @@ def clear_model_cache():
 # ── Domain registry ───────────────────────────────────────────────────────────
 DOMAINS = {
     "cylinder_flow": {
-        "label":       "Cylinder Flow (CFD)",
-        "description": "2D fluid flow past a cylinder — von Kármán vortex street",
-        "data_dir":    "data",
-        "checkpoint":  "checkpoints/best_model.pth",
-        "node_input":  11,
-        "edge_input":  3,
-        "mp_steps":    15,
-        "dt":          0.01,
-        "available":   True,
+        "label":         "Cylinder Flow (CFD)",
+        "description":   "2D fluid flow past a cylinder — von Kármán vortex street",
+        "data_dir":      "data",
+        "checkpoint":    "checkpoints/best_model.pth",
+        "node_input":    11,
+        "edge_input":    3,
+        "mp_steps":      15,
+        "dt":            0.01,
+        "available":     True,
+        "target_fields": ["velocity", "pressure"],
     },
     "flag_simple": {
         "label":       "Flag Simple (Cloth)",

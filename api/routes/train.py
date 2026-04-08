@@ -24,6 +24,7 @@ router = APIRouter(prefix="/train")
 # ── Request models ────────────────────────────────────────────────────────────
 class TrainConfig(BaseModel):
     domain:                   str   = "cylinder_flow"
+    target_field:             str   = "velocity"
     epochs:                   int   = 100
     batch_size:               int   = 20
     lr:                       float = 1e-4
@@ -211,17 +212,21 @@ def train_start(config: TrainConfig):
     os.makedirs("runs", exist_ok=True)
     cfg_path = "runs/ui_train_config.json"
     _DOMAIN_SIZES = {
-        "cylinder_flow": {"output_size": 2, "node_input_size": 11, "edge_input_size": 3},
-        "flag_simple":   {"output_size": 3, "node_input_size": 12, "edge_input_size": 7},
+        ("cylinder_flow", "velocity"):  {"output_size": 2, "node_input_size": 11, "edge_input_size": 3},
+        ("cylinder_flow", "pressure"):  {"output_size": 1, "node_input_size": 10, "edge_input_size": 3},
+        ("flag_simple",   "velocity"):  {"output_size": 3, "node_input_size": 12, "edge_input_size": 7},
     }
-    if config.domain in _DOMAIN_SIZES:
-        sizes = _DOMAIN_SIZES[config.domain]
+    _tf = config.target_field if config.domain == "cylinder_flow" else "velocity"
+    key = (config.domain, _tf)
+    if key in _DOMAIN_SIZES:
+        sizes = _DOMAIN_SIZES[key]
         config.output_size     = sizes["output_size"]
         config.node_input_size = sizes["node_input_size"]
         config.edge_input_size = sizes["edge_input_size"]
     with open(cfg_path, "w") as f:
         json.dump({
             "domain":                  config.domain,
+            "target_field":            config.target_field,
             "output_size":             config.output_size,
             "node_input_size":         config.node_input_size,
             "edge_input_size":         config.edge_input_size,

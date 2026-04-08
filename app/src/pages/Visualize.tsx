@@ -402,10 +402,10 @@ export const Visualize: React.FC = () => {
               </div>
             </div>
             <div className="h-[400px] relative">
-              <MeshPlot 
-                crds={metadata.crds} 
-                triangles={metadata.triangles} 
-                values={currentFrame.error} 
+              <MeshPlot
+                crds={metadata.crds}
+                triangles={metadata.triangles}
+                values={currentFrame.error}
                 title={`Error Hotspot at t=${t}`}
                 colorScale={d3.scaleSequential(d3.interpolateReds).domain([0, 0.1])}
               />
@@ -414,6 +414,36 @@ export const Visualize: React.FC = () => {
               </div>
             </div>
           </section>
+
+          {/* Confidence Score Card */}
+          {metadata?.confidence_score != null && (
+            <div className="border border-gray-700 rounded-lg p-4 bg-gray-800/50">
+              <h3 className="font-semibold text-gray-300 mb-2">Training Distribution Confidence</h3>
+              <div className="flex items-center gap-4">
+                <span className={`text-3xl font-bold ${
+                  metadata.confidence_score >= 0.7 ? "text-green-400" :
+                  metadata.confidence_score >= 0.4 ? "text-yellow-400" : "text-red-400"
+                }`}>
+                  {Math.round(metadata.confidence_score * 100)}%
+                </span>
+                <span className={`text-lg font-semibold px-3 py-1 rounded ${
+                  metadata.confidence_score >= 0.7 ? "bg-green-500/20 text-green-400" :
+                  metadata.confidence_score >= 0.4 ? "bg-yellow-500/20 text-yellow-400" :
+                  "bg-red-500/20 text-red-400"
+                }`}>
+                  {metadata.confidence_label ?? (
+                    metadata.confidence_score >= 0.7 ? "HIGH" :
+                    metadata.confidence_score >= 0.4 ? "MEDIUM" : "LOW"
+                  )}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Measures how similar this test trajectory is to the training distribution,
+                based on nearest-neighbor distance in the model's latent embedding space.
+                Low scores indicate out-of-distribution inputs where predictions may be unreliable.
+              </p>
+            </div>
+          )}
         </div>
       )}
 

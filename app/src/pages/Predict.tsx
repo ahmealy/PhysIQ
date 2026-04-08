@@ -383,6 +383,31 @@ export const Predict: React.FC = () => {
                   <p className="text-lg font-bold text-green-400">{rolloutResult.speedup}x</p>
                 </div>
               </div>
+              {rolloutResult?.confidence_score != null && (
+                <div className="flex items-center gap-2 mt-2">
+                  <span className="text-sm text-gray-400">Confidence:</span>
+                  <div className="flex-1 bg-gray-700 rounded-full h-2 max-w-32">
+                    <div
+                      className={`h-2 rounded-full ${
+                        rolloutResult.confidence_score >= 0.7 ? "bg-green-500" :
+                        rolloutResult.confidence_score >= 0.4 ? "bg-yellow-500" : "bg-red-500"
+                      }`}
+                      style={{ width: `${Math.max(0, rolloutResult.confidence_score * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-sm font-semibold text-gray-200">
+                    {Math.round(rolloutResult.confidence_score * 100)}%
+                  </span>
+                  <span className={`text-xs px-2 py-0.5 rounded font-bold ${
+                    rolloutResult.confidence_score >= 0.7 ? "bg-green-500/20 text-green-400" :
+                    rolloutResult.confidence_score >= 0.4 ? "bg-yellow-500/20 text-yellow-400" :
+                    "bg-red-500/20 text-red-400"
+                  }`}>
+                    {rolloutResult.confidence_score >= 0.7 ? "HIGH" :
+                     rolloutResult.confidence_score >= 0.4 ? "MEDIUM" : "LOW"}
+                  </span>
+                </div>
+              )}
               <button
                 onClick={() => navigate(`/visualize?file=${rolloutResult.pkl_path.split('/').pop()}`)}
                 className="w-full py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-2"

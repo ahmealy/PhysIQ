@@ -50,23 +50,31 @@ _model_cache: dict = {}
 
 def get_model(checkpoint_path: str, device: str):
     """
-    Load and cache the Simulator. Returns cached instance if already loaded
-    from the same checkpoint and device.
+    Load and cache the correct Simulator based on checkpoint metadata.
+    Reads domain from checkpoint to select simulator class.
     """
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-    from model.simulator import Simulator
-
     key = (checkpoint_path, device)
     if key not in _model_cache:
-        sim = Simulator(
-            message_passing_num=15,
-            node_input_size=11,
-            edge_input_size=3,
-            device=device,
-        )
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        domain = ckpt.get("domain", "cylinder_flow")
+
+        if domain == "flag_simple":
+            from model.flag_simulator import FlagSimulator
+            sim = FlagSimulator(
+                message_passing_num=15,
+                device=device,
+            )
+        else:
+            from model.simulator import Simulator
+            node_input_size = ckpt.get("node_input_size", 11)
+            edge_input_size = ckpt.get("edge_input_size", 3)
+            sim = Simulator(
+                message_passing_num=15,
+                node_input_size=node_input_size,
+                edge_input_size=edge_input_size,
+                device=device,
+            )
+
         sim.load_state_dict(ckpt["model_state_dict"])
         sim.eval()
         _model_cache[key] = sim
@@ -103,3 +111,11 @@ DOMAINS = {
         "available":   False,
     },
 }
+
+
+def _probe_flag_available() -> bool:
+    """Check if flag_simple data has been parsed and is ready."""
+    return os.path.exists("data_flag/train_pos.npz")
+
+# Update flag_simple availability at import time
+DOMAINS["flag_simple"]["available"] = _probe_flag_available()

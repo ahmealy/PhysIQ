@@ -17,7 +17,6 @@ from torch_geometric.transforms import FaceToEdge
 
 from .model import EncoderProcesserDecoder
 from utils import normalization
-from utils.utils import NodeType
 
 
 def _init_weights(m):
@@ -89,22 +88,25 @@ class FlagSimulator(nn.Module):
         graph.edge_attr = edge_attr
         return graph
 
-    def _build_node_features(self, graph: Data) -> torch.Tensor:
+    def _build_node_features(self, graph: Data, node_type_col: torch.Tensor) -> torch.Tensor:
         """
         Node features [N, 12]:
             velocity[3]  = world_pos_t - world_pos_{t-1}
             one_hot[9]   = one_hot(node_type, num_classes=9)
+
+        Args:
+            graph: cloth Data object with world_pos and prev_x attributes
+            node_type_col: [N] int64 tensor of node type indices (extracted before x overwrite)
         """
         world_pos  = graph.world_pos   # [N, 3]
         prev_world = graph.prev_x      # [N, 3]
 
-        velocity  = world_pos - prev_world                          # [N, 3]
-        node_type = graph.x[:, 3:4].squeeze(-1).long()             # [N]
-        one_hot   = F.one_hot(node_type, num_classes=9).float()    # [N, 9]
-        node_feats = torch.cat([velocity, one_hot], dim=-1)         # [N, 12]
+        velocity  = world_pos - prev_world                            # [N, 3]
+        one_hot   = F.one_hot(node_type_col, num_classes=9).float()  # [N, 9]
+        node_feats = torch.cat([velocity, one_hot], dim=-1)           # [N, 12]
         return node_feats
 
-    def forward(self, graph: Data):
+    def forward(self, graph: Data, velocity_sequence_noise: torch.Tensor = None):
         """
         Training (model.training == True):
             Returns (predicted_acc_norm, target_acc_norm) — both [N, 3].
@@ -113,19 +115,31 @@ class FlagSimulator(nn.Module):
         Inference (model.eval()):
             Returns next_world_pos [N, 3] via Verlet integration.
         """
+        # Move graph to model device to avoid CPU/CUDA mismatch with normalizer buffers
+        device = next(self.model.parameters()).device
+        graph = graph.to(device)
+
         graph = self._build_graph(graph)
 
         world_pos  = graph.world_pos    # [N, 3]
         prev_world = graph.prev_x       # [N, 3]
 
-        node_feats = self._build_node_features(graph)
+        # Extract node_type BEFORE graph.x is overwritten by normalizer
+        node_type_col = graph.x[:, 3:4].squeeze(-1).long()  # [N]
+
+        node_feats = self._build_node_features(graph, node_type_col)
+
+        # Optional noise injection (same as simulator.py) for training stability
+        if velocity_sequence_noise is not None:
+            node_feats = node_feats + velocity_sequence_noise
+
         graph.x    = self._node_normalizer(node_feats, self.training)
         graph.edge_attr = self._edge_normalizer(graph.edge_attr, self.training)
 
         predicted_acc_norm = self.model(graph)   # [N, 3]
 
         if self.training:
-            target_world    = graph.y                                      # [N, 3]
+            target_world    = graph.y
             target_acc      = target_world - 2.0 * world_pos + prev_world  # Verlet
             target_acc_norm = self._output_normalizer(target_acc, self.training)
             return predicted_acc_norm, target_acc_norm

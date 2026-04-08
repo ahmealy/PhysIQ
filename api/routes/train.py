@@ -30,6 +30,9 @@ class TrainConfig(BaseModel):
     noise_std:                float = 0.02
     early_stopping_patience:  int   = 10
     message_passing_steps:    int   = 15
+    output_size:              int   = 2
+    node_input_size:          int   = 11
+    edge_input_size:          int   = 3
 
 
 class RemoteConfig(BaseModel):
@@ -207,8 +210,21 @@ def train_start(config: TrainConfig):
     # Write config JSON for train.py to consume
     os.makedirs("runs", exist_ok=True)
     cfg_path = "runs/ui_train_config.json"
+    _DOMAIN_SIZES = {
+        "cylinder_flow": {"output_size": 2, "node_input_size": 11, "edge_input_size": 3},
+        "flag_simple":   {"output_size": 3, "node_input_size": 12, "edge_input_size": 7},
+    }
+    if config.domain in _DOMAIN_SIZES:
+        sizes = _DOMAIN_SIZES[config.domain]
+        config.output_size     = sizes["output_size"]
+        config.node_input_size = sizes["node_input_size"]
+        config.edge_input_size = sizes["edge_input_size"]
     with open(cfg_path, "w") as f:
         json.dump({
+            "domain":                  config.domain,
+            "output_size":             config.output_size,
+            "node_input_size":         config.node_input_size,
+            "edge_input_size":         config.edge_input_size,
             "dataset_dir":             domain_cfg["data_dir"],
             "checkpoint_dir":          os.path.dirname(domain_cfg["checkpoint"]),
             "num_epochs":              config.epochs,

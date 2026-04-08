@@ -161,18 +161,14 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
         try:
             from confidence.index import NearestNeighborIndex
             from model.embedding import extract_embedding
-            import torch_geometric.transforms as _T
 
             _index = NearestNeighborIndex.load(index_path)
 
             # Use first graph of the rollout trajectory for the embedding
+            # Apply same transform used at index-build time (transformer is already in scope)
             _first_graph = dataset[req.trajectory_index * n_steps]
-            _tfm_emb = _T.Compose([
-                _T.FaceToEdge(),
-                _T.Cartesian(norm=False),
-                _T.Distance(norm=False),
-            ])
-            _first_graph = _tfm_emb(_first_graph)
+            if transformer is not None:
+                _first_graph = transformer(_first_graph)
             _emb = extract_embedding(model, _first_graph, device=device)
             confidence_score = float(_index.query(_emb))
         except Exception:
@@ -258,19 +254,13 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
         try:
             from confidence.index import NearestNeighborIndex
             from model.embedding import extract_embedding
-            import torch_geometric.transforms as _T
 
             _index = NearestNeighborIndex.load(index_path)
 
             # Use first graph of the rollout trajectory for the embedding
+            # Cloth (flag_simple) uses no transform — embedding index was built the same way
             _first_idx = int(dataset._cum_steps[req.trajectory_index])
             _first_graph = dataset[_first_idx]
-            _tfm_emb = _T.Compose([
-                _T.FaceToEdge(),
-                _T.Cartesian(norm=False),
-                _T.Distance(norm=False),
-            ])
-            _first_graph = _tfm_emb(_first_graph)
             _emb = extract_embedding(model, _first_graph, device=device)
             confidence_score = float(_index.query(_emb))
         except Exception:

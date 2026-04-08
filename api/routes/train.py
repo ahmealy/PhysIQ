@@ -10,7 +10,7 @@ import shlex
 import signal
 import subprocess
 import sys
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -23,8 +23,8 @@ router = APIRouter(prefix="/train")
 
 # ── Request models ────────────────────────────────────────────────────────────
 class TrainConfig(BaseModel):
-    domain:                   str   = "cylinder_flow"
-    target_field:             str   = "velocity"
+    domain:                   str                           = "cylinder_flow"
+    target_field:             Literal["velocity", "pressure"] = "velocity"
     epochs:                   int   = 100
     batch_size:               int   = 20
     lr:                       float = 1e-4
@@ -226,7 +226,7 @@ def train_start(config: TrainConfig):
     with open(cfg_path, "w") as f:
         json.dump({
             "domain":                  config.domain,
-            "target_field":            config.target_field,
+            "target_field":            _tf,
             "output_size":             config.output_size,
             "node_input_size":         config.node_input_size,
             "edge_input_size":         config.edge_input_size,

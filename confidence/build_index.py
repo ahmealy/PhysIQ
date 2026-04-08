@@ -97,8 +97,8 @@ def main():
     index.build(embeddings)
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     index.save(args.output)
-    print("Index saved to %s (backend: %s, diameter: %.4f)" % (
-        args.output, index.backend, index.train_diameter))
+    print("Index saved to %s (backend: %s, diameter: %.4f, N=%d)" % (
+        args.output, index.backend, index.train_diameter, len(embeddings)))
 
 
 if __name__ == "__main__":

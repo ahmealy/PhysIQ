@@ -120,11 +120,12 @@ KDTree* kdtree_build(const float* data, int n, int dim) {
     return reinterpret_cast<KDTree*>(impl);
 }
 
-float kdtree_query_nn(const KDTree* tree, const float* query) {
+float kdtree_query_nn(const KDTree* tree, const float* query, int* out_idx) {
     auto* impl = reinterpret_cast<const KDTreeImpl*>(tree);
     float best_sq = std::numeric_limits<float>::infinity();
     int   best_idx = -1;
     impl->search(impl->root, query, best_sq, best_idx);
+    if (out_idx) *out_idx = best_idx;
     return std::sqrt(best_sq);
 }
 

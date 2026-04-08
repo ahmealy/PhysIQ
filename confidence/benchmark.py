@@ -25,11 +25,19 @@ import numpy as np
 from scipy.spatial import KDTree as ScipyKDTree
 
 
-def _bench_one(n: int, dim: int = 128, n_queries: int = 100, seed: int = 0):
+def _bench_one(n: int, dim: int = 128, n_queries: int = 100, seed: int = 0,
+               real_data: np.ndarray = None):
     """Benchmark both backends for given N. Returns result dict."""
     rng = np.random.default_rng(seed)
-    data    = rng.random((n, dim)).astype(np.float32)
-    queries = rng.random((n_queries, dim)).astype(np.float32)
+    if real_data is not None:
+        # Use a subsample of real embeddings; generate synthetic queries from same dist
+        idx = rng.choice(len(real_data), size=min(n, len(real_data)), replace=False)
+        data = real_data[idx].astype(np.float32)
+        n = len(data)
+        queries = real_data[rng.choice(len(real_data), size=n_queries, replace=True)].astype(np.float32)
+    else:
+        data    = rng.random((n, dim)).astype(np.float32)
+        queries = rng.random((n_queries, dim)).astype(np.float32)
 
     results = {}
 
@@ -92,7 +100,7 @@ def _bench_one(n: int, dim: int = 128, n_queries: int = 100, seed: int = 0):
     return results
 
 
-def run_benchmark(dim: int = 128, n_queries: int = 100):
+def run_benchmark(dim: int = 128, n_queries: int = 100, real_data: np.ndarray = None):
     ns = [100, 1000, 10000]
 
     sep = "─" * 67
@@ -105,7 +113,7 @@ def run_benchmark(dim: int = 128, n_queries: int = 100):
     max_errs = []
 
     for n in ns:
-        res = _bench_one(n, dim=dim, n_queries=n_queries)
+        res = _bench_one(n, dim=dim, n_queries=n_queries, real_data=real_data)
 
         sp = res["scipy"]
         print("%-8d %-14s %-12.2f %-12.3f %-12.2f %s" % (
@@ -143,7 +151,8 @@ if __name__ == "__main__":
             d = pickle.load(f)
         embs = d["embeddings"]
         print("Using real embeddings from %s: shape %s" % (args.index, embs.shape))
-        # Override dimension
+        # Override dimension and pass real data to benchmark
         args.dim = embs.shape[1]
-
-    run_benchmark(dim=args.dim, n_queries=args.queries)
+        run_benchmark(dim=args.dim, n_queries=args.queries, real_data=embs)
+    else:
+        run_benchmark(dim=args.dim, n_queries=args.queries)

@@ -29,7 +29,7 @@ public:
         if (tree_) kdtree_free(tree_);
     }
 
-    // query(point, k=1) -> (distances, indices)
+    // query(point, k=1) -> (distance, index)
     // point shape: [1, dim]  (same as scipy interface: query(point.reshape(1, -1), k=1))
     std::pair<float, int> query(
         py::array_t<float, py::array::c_style | py::array::forcecast> point,
@@ -38,9 +38,9 @@ public:
         auto buf = point.request();
         // Accept either [dim] or [1, dim]
         const float* ptr = static_cast<const float*>(buf.ptr);
-        float dist = kdtree_query_nn(tree_, ptr);
-        // We only support k=1; index not tracked for performance — return 0
-        return {dist, 0};
+        int best_idx = -1;
+        float dist = kdtree_query_nn(tree_, ptr, &best_idx);
+        return {dist, best_idx};
     }
 
 private:

@@ -62,6 +62,18 @@ output_size     = cfg['output_size']
 node_input_size = cfg['node_input_size']
 edge_input_size = cfg['edge_input_size']
 
+target_field = cfg.get('target_field', 'velocity')
+
+# Pressure mode overrides cylinder_flow defaults
+if domain == 'cylinder_flow' and target_field == 'pressure':
+    cfg['output_size']     = 1
+    cfg['node_input_size'] = 10
+    cfg['edge_input_size'] = 3
+
+output_size     = cfg['output_size']
+node_input_size = cfg['node_input_size']
+edge_input_size = cfg['edge_input_size']
+
 dataset_dir             = cfg['dataset_dir']
 batch_size              = cfg['batch_size']
 noise_std               = cfg['noise_std']
@@ -88,7 +100,8 @@ else:
         message_passing_num=cfg['message_passing_num'],
         node_input_size=node_input_size,
         edge_input_size=edge_input_size,
-        device=device
+        device=device,
+        target_field=target_field,
     )
     transformer = T.Compose([
         T.FaceToEdge(),
@@ -121,7 +134,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
     print(f'Resumed from epoch {ckpt["epoch"]} with valid loss {best_valid_loss:.2e}')
     return start_epoch, best_valid_loss
 
-def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain):
+def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain, target_field="velocity"):
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -139,6 +152,9 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
         else:
             from utils.noise import get_velocity_noise
             velocity_sequence_noise = get_velocity_noise(graph, noise_std=noise_std, device=device)
+            # Trim noise width to match field: [N,1] for pressure, [N,2] for velocity
+            if domain == 'cylinder_flow' and target_field == 'pressure':
+                velocity_sequence_noise = velocity_sequence_noise[:, :1]
             predicted_acc, target_acc = model(graph, velocity_sequence_noise)
             node_type = graph.x[:, 0]
             mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)
@@ -191,8 +207,10 @@ if __name__ == '__main__':
         train_dataset = FlagDataset(data_root=cfg['dataset_dir'], split='train')
         valid_dataset = FlagDataset(data_root=cfg['dataset_dir'], split='valid')
     else:
-        train_dataset = FpcDataset(data_root=dataset_dir, split='train')
-        valid_dataset = FpcDataset(data_root=dataset_dir, split='valid')
+        train_dataset = FpcDataset(data_root=dataset_dir, split='train',
+                                   target_field=target_field)
+        valid_dataset = FpcDataset(data_root=dataset_dir, split='valid',
+                                   target_field=target_field)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=2, pin_memory=False)
@@ -209,7 +227,7 @@ if __name__ == '__main__':
 
     for epoch in range(start_epoch, num_epochs + 1):
 
-        train_loss = train_one_epoch(simulator, train_loader, optimizer, transformer, device, noise_std, domain)
+        train_loss = train_one_epoch(simulator, train_loader, optimizer, transformer, device, noise_std, domain, target_field)
         valid_loss = evaluate(simulator, valid_loader, transformer, device, domain)
 
         print(f"Epoch {epoch}/{num_epochs} Train Loss: {train_loss:.2e} Valid Loss: {valid_loss:.2e}")
@@ -229,6 +247,7 @@ if __name__ == '__main__':
                 'optimizer_state_dict': optimizer.state_dict(),
                 'valid_loss':           valid_loss,
                 'domain':               domain,
+                'target_field':         target_field,
                 'output_size':          output_size,
                 'node_input_size':      node_input_size,
                 'edge_input_size':      edge_input_size,

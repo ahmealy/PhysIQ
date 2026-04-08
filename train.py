@@ -242,4 +242,32 @@ if __name__ == '__main__':
                 break
 
     writer.close()
+
+    # ── Build confidence index (optional, default enabled) ────────────────────────
+    if cfg.get('build_confidence_index', True):
+        try:
+            print("\nBuilding confidence index on training set...")
+            from confidence.index import NearestNeighborIndex
+            from model.embedding import extract_embedding
+            from torch_geometric.loader import DataLoader as SingleLoader
+
+            embeddings = []
+            simulator.eval()
+            single_loader = SingleLoader(train_dataset, batch_size=1, shuffle=False, num_workers=0)
+            for graph in tqdm.tqdm(single_loader, desc='Extracting embeddings'):
+                if transformer is not None:
+                    graph = transformer(graph)
+                emb = extract_embedding(simulator, graph, device=device)
+                embeddings.append(emb)
+
+            embeddings_arr = np.stack(embeddings)   # [N_train, 128]
+            index = NearestNeighborIndex()
+            index.build(embeddings_arr)
+            index_path = os.path.join(log_dir, 'embedding_index.pkl')
+            index.save(index_path)
+            print("Confidence index saved to %s (backend: %s, diameter: %.4f, N=%d)" % (
+                index_path, index.backend, index.train_diameter, len(embeddings)))
+        except Exception as e:
+            print("Warning: confidence index build failed (non-fatal): %s" % e)
+
     print(f"\nTraining finished. Best model at epoch {best_epoch} with validation loss {best_valid_loss:.2e}")

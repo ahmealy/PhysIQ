@@ -60,10 +60,15 @@ def _compute_rmse(predicted: np.ndarray, targets: np.ndarray) -> np.ndarray:
     return np.sqrt(np.mean(sq, axis=1))
 
 
-def _compute_mae(predicted: np.ndarray, targets: np.ndarray) -> np.ndarray:
-    """Per-step MAE — mean absolute error of velocity magnitude across nodes, shape [T]."""
-    pred_mag   = np.linalg.norm(predicted, axis=-1)   # [T, N]
-    target_mag = np.linalg.norm(targets,   axis=-1)   # [T, N]
+def _compute_mae(predicted: np.ndarray, targets: np.ndarray,
+                 target_field: str = "velocity") -> np.ndarray:
+    """Per-step MAE of field magnitude across nodes, shape [T]."""
+    if target_field == "pressure":
+        pred_mag   = predicted[:, :, 0]   # [T, N] — scalar pressure, no norm
+        target_mag = targets[:, :, 0]     # [T, N]
+    else:
+        pred_mag   = np.linalg.norm(predicted, axis=-1)   # [T, N]
+        target_mag = np.linalg.norm(targets,   axis=-1)   # [T, N]
     return np.mean(np.abs(pred_mag - target_mag), axis=1)  # [T]
 
 
@@ -112,6 +117,7 @@ def get_result(filename: str):
     confidence_score = meta.get("confidence_score", None)
     confidence_label = _confidence_label(confidence_score)
     domain = meta.get("domain", "cylinder_flow")
+    target_field = meta.get("target_field", "velocity")
 
     return {
         "timesteps":       int(predicted.shape[0]),
@@ -125,6 +131,7 @@ def get_result(filename: str):
         "confidence_score": confidence_score,
         "confidence_label": confidence_label,
         "domain":           domain,
+        "target_field":     target_field,
     }
 
 
@@ -135,14 +142,19 @@ def get_frame(filename: str, t: int):
     Called on-demand by the animation scrubber.
     """
     predicted, targets, crds, meta = _load_pkl(filename)
+    target_field = meta.get("target_field", "velocity")
     T = predicted.shape[0]
 
     if t < 0 or t >= T:
         raise HTTPException(400, "Timestep %d out of range (0-%d)" % (t, T - 1))
 
-    pred_mag   = np.linalg.norm(predicted[t], axis=-1)   # [N]
-    target_mag = np.linalg.norm(targets[t],   axis=-1)   # [N]
-    error      = np.abs(pred_mag - target_mag)            # [N]
+    if target_field == "pressure":
+        pred_mag   = predicted[t, :, 0]   # [N] — scalar pressure
+        target_mag = targets[t, :, 0]     # [N]
+    else:
+        pred_mag   = np.linalg.norm(predicted[t], axis=-1)   # [N]
+        target_mag = np.linalg.norm(targets[t],   axis=-1)   # [N]
+    error = np.abs(pred_mag - target_mag)   # [N]
     rmse       = float(np.sqrt(np.mean(np.square(predicted[t] - targets[t]))))
 
     return {
@@ -158,9 +170,10 @@ def get_frame(filename: str, t: int):
 @router.get("/{filename}/rmse")
 def get_rmse(filename: str):
     """Returns the full RMSE and MAE curves — lightweight, no mesh data."""
-    predicted, targets, _, _meta = _load_pkl(filename)
+    predicted, targets, _, meta = _load_pkl(filename)
+    target_field = meta.get("target_field", "velocity")
     per_step_rmse = _compute_rmse(predicted, targets)
-    per_step_mae  = _compute_mae(predicted, targets)
+    per_step_mae  = _compute_mae(predicted, targets, target_field)
     T = len(per_step_rmse)
     times = [round(i * 0.01, 3) for i in range(T)]
 
@@ -174,6 +187,7 @@ def get_rmse(filename: str):
         "mae_at_0":       float(per_step_mae[0]),
         "mae_at_end":     float(per_step_mae[-1]),
         "growth_ratio":   float(per_step_rmse[-1] / (per_step_rmse[0] + 1e-12)),
+        "target_field":   target_field,
     }
 
 

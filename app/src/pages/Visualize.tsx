@@ -57,13 +57,21 @@ export const Visualize: React.FC = () => {
 
   const fieldLabel = metadata?.domain === "flag_simple"
     ? "Position Magnitude (m)"
-    : "Velocity Magnitude (m/s)";
+    : metadata?.target_field === "pressure"
+      ? "Pressure (Pa)"
+      : "Velocity Magnitude (m/s)";
 
   const errorLabel = metadata?.domain === "flag_simple"
     ? "Position Error (m)"
-    : "Velocity Error (m/s)";
+    : metadata?.target_field === "pressure"
+      ? "Pressure Error (Pa)"
+      : "Velocity Error (m/s)";
 
-  const errorUnit = metadata?.domain === "flag_simple" ? "m" : "m/s";
+  const errorUnit = metadata?.domain === "flag_simple"
+    ? "m"
+    : metadata?.target_field === "pressure"
+      ? "Pa"
+      : "m/s";
 
   const overfittingStatus = () => {
     // If we have actual training epoch data, use it

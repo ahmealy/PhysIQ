@@ -372,6 +372,15 @@ export const Predict: React.FC = () => {
                     {domain === "flag_simple" ? "CLOTH MODEL" : "CFD MODEL"}
                   </span>
                 )}
+                {domain === 'cylinder_flow' && rolloutResult?.target_field && (
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                    rolloutResult.target_field === "pressure"
+                      ? "bg-orange-500/20 text-orange-400"
+                      : "bg-cyan-500/20 text-cyan-400"
+                  }`}>
+                    {rolloutResult.target_field === "pressure" ? "PRESSURE" : "VELOCITY"}
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>

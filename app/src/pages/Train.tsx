@@ -12,6 +12,7 @@ export const Train: React.FC = () => {
     noise_std: 0.02,
     early_stopping_patience: 10,
     message_passing_steps: 15,
+    target_field: 'velocity',
   });
 
   const [isRunning, setIsRunning] = useState(false);
@@ -250,6 +251,24 @@ export const Train: React.FC = () => {
               )}
               {Object.values(domains).some((d: any) => !d.available) && (
                 <p className="text-[10px] text-slate-600 italic">Other domains are coming soon</p>
+              )}
+              {/* Target field selector — cylinder_flow only */}
+              {config.domain === 'cylinder_flow' && (
+                <div className="mt-3 space-y-1.5">
+                  <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Target Field</label>
+                  <select
+                    value={config.target_field}
+                    onChange={(e) => setConfig({ ...config, target_field: e.target.value })}
+                    disabled={isRunning}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
+                  >
+                    <option value="velocity">Velocity — fluid velocity field</option>
+                    <option value="pressure">Pressure — fluid pressure field</option>
+                  </select>
+                  {config.target_field === 'pressure' && (
+                    <p className="text-[10px] text-orange-400/80">Requires re-parsed data with pressure.dat files</p>
+                  )}
+                </div>
               )}
             </div>
           </section>

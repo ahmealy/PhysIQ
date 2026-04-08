@@ -78,11 +78,10 @@ if __name__ == '__main__':
         fp = np.memmap(filename, dtype='float32', mode='w+', shape=(shape0, shape1, 2))
 
         pressure_filename = os.path.join(tf_datasetPath, split + '_pressure.dat')
-        if not os.path.exists(pressure_filename):
-            fp_pressure = np.memmap(pressure_filename, dtype='float32', mode='w+',
-                                    shape=(shape0, shape1, 1))
-        else:
-            fp_pressure = None  # Already exists — skip
+        # Always recreate pressure memmap (same as velocity) — avoids misalignment if a previous
+        # run was interrupted after creating the file but before completing the write.
+        fp_pressure = np.memmap(pressure_filename, dtype='float32', mode='w+',
+                                shape=(shape0, shape1, 1))
 
         write_shift  = 0
         for index, d in enumerate(ds):

@@ -36,6 +36,15 @@ def _get_dataset(data_dir: str, split: str) -> FpcDataset:
     return _dataset_cache[key]
 
 
+def _get_cloth_dataset(data_dir: str, split: str):
+    """Load and cache FlagDataset."""
+    from dataset.flag_dataset import FlagDataset
+    key = (data_dir, split, "cloth")
+    if key not in _dataset_cache:
+        _dataset_cache[key] = FlagDataset(data_dir, split=split)
+    return _dataset_cache[key]
+
+
 class RolloutRequest(BaseModel):
     domain:            str = "cylinder_flow"
     trajectory_index:  int = 0
@@ -160,6 +169,76 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     }
 
 
+def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> dict:
+    """Cloth (flag_simple) rollout using Verlet integration."""
+    from utils.utils import NodeType
+    from api.state import get_model
+
+    model = get_model(cfg["checkpoint"], device)
+    dataset = _get_cloth_dataset(cfg.get("data_dir", "data_flag"), req.split)
+
+    n_traj = dataset.n_traj
+    if req.trajectory_index >= n_traj:
+        raise ValueError("trajectory_index %d out of range (0-%d)" % (
+            req.trajectory_index, n_traj - 1))
+
+    n_steps = dataset.steps_per_traj[req.trajectory_index]
+    predicteds, targets_list = [], []
+    prev_world = None
+    cur_world  = None
+
+    t_start = time.perf_counter()
+
+    with torch.no_grad():
+        for i in range(n_steps):
+            idx = int(dataset._cum_steps[req.trajectory_index]) + i
+            graph = dataset[idx]
+            graph = graph.to(device)
+
+            if cur_world is not None:
+                graph.world_pos = cur_world.detach()
+                graph.x[:, :3]  = cur_world.detach()
+                graph.prev_x    = prev_world.detach()
+
+            prev_world = graph.world_pos.clone()
+            next_world = model(graph)  # [N, 3]
+
+            node_type = graph.x[:, 3].long()
+            handle_mask = (node_type == NodeType.HANDLE)
+            next_world[handle_mask] = graph.y[handle_mask]
+
+            predicteds.append(next_world.detach().cpu().numpy())
+            targets_list.append(graph.y.detach().cpu().numpy())
+            cur_world = next_world
+
+            if i % 20 == 0 or i == n_steps - 1:
+                progress_callback(i + 1, n_steps)
+
+    elapsed = time.perf_counter() - t_start
+    sim_time = n_steps * cfg.get("dt", 0.01)
+    speedup = sim_time / (elapsed + 1e-12)
+
+    predicted_arr = np.stack(predicteds)
+    targets_arr   = np.stack(targets_list)
+    mesh_pos = np.asarray(dataset.mesh_pos_list[req.trajectory_index], dtype=np.float32)
+
+    sq = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
+    per_step_rmse = np.sqrt(np.mean(sq, axis=1))
+
+    os.makedirs("result", exist_ok=True)
+    pkl_path = "result/flag_result%d.pkl" % req.trajectory_index
+    with open(pkl_path, "wb") as f:
+        pickle.dump([[predicted_arr, targets_arr], mesh_pos, {"domain": "flag_simple"}], f)
+
+    return {
+        "elapsed_seconds": round(elapsed, 3),
+        "speedup":         round(speedup, 2),
+        "pkl_path":        pkl_path,
+        "rmse_final":      float(per_step_rmse[-1]),
+        "similarity_score": None,
+    }
+
+
 @router.post("/rollout")
 async def run_rollout(req: RolloutRequest):
     """
@@ -199,9 +278,10 @@ async def run_rollout(req: RolloutRequest):
     async def generate() -> AsyncGenerator[str, None]:
         try:
             # Kick off the blocking inference in a thread
+            run_fn = _run_cloth_rollout_sync if getattr(req, 'domain', 'cylinder_flow') == 'flag_simple' else _run_rollout_sync
             future = loop.run_in_executor(
                 None,
-                _run_rollout_sync,
+                run_fn,
                 req, cfg, device, progress_callback,
             )
 

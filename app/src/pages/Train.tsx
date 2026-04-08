@@ -233,7 +233,7 @@ export const Train: React.FC = () => {
             <div className="p-6 space-y-3">
               <select
                 value={config.domain}
-                onChange={(e) => setConfig({ ...config, domain: e.target.value })}
+                onChange={(e) => setConfig({ ...config, domain: e.target.value, target_field: 'velocity' })}
                 disabled={isRunning}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
               >

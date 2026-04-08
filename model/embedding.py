@@ -27,7 +27,7 @@ def extract_embedding(simulator, graph, device: str) -> np.ndarray:
     simulator.eval()
 
     with torch.no_grad():
-        graph = graph.to(device)
+        graph = graph.clone().to(device)
 
         # Extract node_type and velocity from x, exactly as Simulator.forward does
         node_type = graph.x[:, 0:1]   # [N, 1]

@@ -41,7 +41,7 @@ class NearestNeighborIndex:
             confidence_dir = os.path.dirname(os.path.abspath(__file__))
             if confidence_dir not in sys.path:
                 sys.path.insert(0, confidence_dir)
-            from confidence._kdtree import KDTree as CppKDTree  # type: ignore
+            from _kdtree import KDTree as CppKDTree  # type: ignore
             self._cpp_tree = CppKDTree(self.embeddings)
             self.backend = "cpp"
         except ImportError:
@@ -56,6 +56,8 @@ class NearestNeighborIndex:
         Returns confidence score in [0, 1].
         score = clip(1 - d_min / train_diameter, 0, 1)
         """
+        if self._scipy_tree is None:
+            raise RuntimeError("Call build() before query()")
         q = embedding.reshape(1, -1).astype(np.float32)
 
         if self._cpp_tree is not None:
@@ -81,5 +83,7 @@ class NearestNeighborIndex:
         with open(path, "rb") as f:
             d = pickle.load(f)
         obj = cls()
-        obj.build(d["embeddings"])
+        obj.build(d["embeddings"])  # rebuilds trees from embeddings
+        # Restore stored train_diameter (may differ from recomputed if manually set)
+        obj.train_diameter = float(d["train_diameter"])
         return obj

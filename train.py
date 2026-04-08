@@ -58,10 +58,6 @@ for key, val in _DOMAIN_DEFAULTS[domain].items():
     if cfg.get(key) is None:
         cfg[key] = val
 
-output_size     = cfg['output_size']
-node_input_size = cfg['node_input_size']
-edge_input_size = cfg['edge_input_size']
-
 target_field = cfg.get('target_field', 'velocity')
 
 # Pressure mode overrides cylinder_flow defaults
@@ -127,6 +123,12 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
             f"Checkpoint domain '{ckpt_domain}' does not match current domain '{domain}'. "
             "Delete the checkpoint or update --config to match the checkpoint domain."
         )
+    ckpt_target_field = ckpt.get('target_field', 'velocity')  # old checkpoints default to velocity
+    if ckpt_target_field != target_field:
+        raise RuntimeError(
+            f"Checkpoint target_field '{ckpt_target_field}' does not match current "
+            f"target_field '{target_field}'. Delete the checkpoint or update --config."
+        )
     model.load_state_dict(ckpt['model_state_dict'])
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     start_epoch = ckpt['epoch'] + 1
@@ -135,6 +137,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
     return start_epoch, best_valid_loss
 
 def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain, target_field="velocity"):
+    assert target_field in ("velocity", "pressure"), f"Unknown target_field: {target_field!r}"
     model.train()
     total_loss = 0.0
     num_batches = 0

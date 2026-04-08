@@ -32,10 +32,25 @@ def _load_pkl(filename: str):
         raise HTTPException(404, "Result file not found: %s" % filename)
     with open(path, "rb") as f:
         data = pickle.load(f)
-    result, crds = data
-    predicted = result[0]   # [T, N, 2]
-    targets   = result[1]   # [T, N, 2]
-    return predicted, targets, crds
+    # Support both old format (2 elements) and new format (3 elements with metadata)
+    if len(data) == 2:
+        result, crds = data
+        meta = {}
+    else:
+        result, crds, meta = data
+    predicted = result[0]   # [T, N, 2] or [T, N, 3]
+    targets   = result[1]   # [T, N, 2] or [T, N, 3]
+    return predicted, targets, crds, meta
+
+
+def _confidence_label(score: Optional[float]) -> Optional[str]:
+    if score is None:
+        return None
+    if score >= 0.7:
+        return "High"
+    if score >= 0.4:
+        return "Medium"
+    return "Low"
 
 
 def _compute_rmse(predicted: np.ndarray, targets: np.ndarray) -> np.ndarray:
@@ -90,9 +105,13 @@ def get_result(filename: str):
     Does NOT return raw velocity arrays (too large).
     Use /results/{filename}/frame/{t} for per-frame data.
     """
-    predicted, targets, crds = _load_pkl(filename)
+    predicted, targets, crds, meta = _load_pkl(filename)
     triangles   = _get_triangles(crds)
     per_step_rmse = _compute_rmse(predicted, targets)
+
+    confidence_score = meta.get("confidence_score", None)
+    confidence_label = _confidence_label(confidence_score)
+    domain = meta.get("domain", "cylinder_flow")
 
     return {
         "timesteps":       int(predicted.shape[0]),
@@ -103,6 +122,9 @@ def get_result(filename: str):
         "per_step_rmse":   per_step_rmse.tolist(),
         "elapsed_seconds": None,   # not stored in pkl — available from rollout SSE
         "speedup":         None,
+        "confidence_score": confidence_score,
+        "confidence_label": confidence_label,
+        "domain":           domain,
     }
 
 
@@ -112,7 +134,7 @@ def get_frame(filename: str, t: int):
     Returns visualization data for a single timestep.
     Called on-demand by the animation scrubber.
     """
-    predicted, targets, crds = _load_pkl(filename)
+    predicted, targets, crds, meta = _load_pkl(filename)
     T = predicted.shape[0]
 
     if t < 0 or t >= T:
@@ -136,7 +158,7 @@ def get_frame(filename: str, t: int):
 @router.get("/{filename}/rmse")
 def get_rmse(filename: str):
     """Returns the full RMSE and MAE curves — lightweight, no mesh data."""
-    predicted, targets, _ = _load_pkl(filename)
+    predicted, targets, _, _meta = _load_pkl(filename)
     per_step_rmse = _compute_rmse(predicted, targets)
     per_step_mae  = _compute_mae(predicted, targets)
     T = len(per_step_rmse)

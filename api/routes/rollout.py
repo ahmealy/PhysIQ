@@ -154,11 +154,36 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
             ref_arr.max(axis=0) - ref_arr.min(axis=0))) + 1e-12
         similarity_score = float(np.clip(1.0 - d_min / d_max, -0.5, 1.0))
 
+    # Confidence score — requires embedding_index.pkl built after training
+    confidence_score = None
+    index_path = os.path.join("runs", "embedding_index.pkl")
+    if os.path.exists(index_path):
+        try:
+            from confidence.index import NearestNeighborIndex
+            from model.embedding import extract_embedding
+            import torch_geometric.transforms as _T
+
+            _index = NearestNeighborIndex.load(index_path)
+
+            # Use first graph of the rollout trajectory for the embedding
+            _first_graph = dataset[req.trajectory_index * n_steps]
+            _tfm_emb = _T.Compose([
+                _T.FaceToEdge(),
+                _T.Cartesian(norm=False),
+                _T.Distance(norm=False),
+            ])
+            _first_graph = _tfm_emb(_first_graph)
+            _emb = extract_embedding(model, _first_graph, device=device)
+            confidence_score = float(_index.query(_emb))
+        except Exception:
+            pass  # confidence is optional — never block the rollout
+
     # Save pkl
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/result%d.pkl" % req.trajectory_index
     with open(pkl_path, "wb") as f:
-        pickle.dump([[predicted_arr, targets_arr], crds], f)
+        pickle.dump([[predicted_arr, targets_arr], crds,
+                     {"domain": req.domain, "confidence_score": confidence_score}], f)
 
     return {
         "elapsed_seconds":  round(elapsed, 3),
@@ -166,6 +191,7 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
         "pkl_path":         pkl_path,
         "rmse_final":       float(per_step_rmse[-1]),
         "similarity_score": round(similarity_score, 3) if similarity_score is not None else None,
+        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
     }
 
 
@@ -225,10 +251,36 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     sq = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
     per_step_rmse = np.sqrt(np.mean(sq, axis=1))
 
+    # Confidence score — requires embedding_index.pkl built after training
+    confidence_score = None
+    index_path = os.path.join("runs", "embedding_index.pkl")
+    if os.path.exists(index_path):
+        try:
+            from confidence.index import NearestNeighborIndex
+            from model.embedding import extract_embedding
+            import torch_geometric.transforms as _T
+
+            _index = NearestNeighborIndex.load(index_path)
+
+            # Use first graph of the rollout trajectory for the embedding
+            _first_idx = int(dataset._cum_steps[req.trajectory_index])
+            _first_graph = dataset[_first_idx]
+            _tfm_emb = _T.Compose([
+                _T.FaceToEdge(),
+                _T.Cartesian(norm=False),
+                _T.Distance(norm=False),
+            ])
+            _first_graph = _tfm_emb(_first_graph)
+            _emb = extract_embedding(model, _first_graph, device=device)
+            confidence_score = float(_index.query(_emb))
+        except Exception:
+            pass  # confidence is optional — never block the rollout
+
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/flag_result%d.pkl" % req.trajectory_index
     with open(pkl_path, "wb") as f:
-        pickle.dump([[predicted_arr, targets_arr], mesh_pos, {"domain": "flag_simple"}], f)
+        pickle.dump([[predicted_arr, targets_arr], mesh_pos,
+                     {"domain": "flag_simple", "confidence_score": confidence_score}], f)
 
     return {
         "elapsed_seconds": round(elapsed, 3),
@@ -236,6 +288,7 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
         "pkl_path":        pkl_path,
         "rmse_final":      float(per_step_rmse[-1]),
         "similarity_score": None,
+        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
     }
 
 

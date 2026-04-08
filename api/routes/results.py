@@ -164,6 +164,7 @@ def get_frame(filename: str, t: int):
         "target_magnitude":     target_mag.tolist(),
         "error":                error.tolist(),
         "rmse":                 rmse,
+        "target_field":         target_field,
     }
 
 

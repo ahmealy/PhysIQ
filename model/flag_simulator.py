@@ -1,13 +1,14 @@
 """
 FlagSimulator — cloth physics simulator using Verlet integration.
 
-Matches DeepMind cloth_model.py:
+Matches DeepMind cloth_model.py exactly:
     node_input_size = 12  (velocity[3] + one_hot(node_type, 9)[9])
-    edge_input_size = 7   (rel_mesh[2] + |rel_mesh|[1] + rel_world[3] + |rel_world|[1])
+    edge_input_size = 7   (rel_world[3] + |rel_world|[1] + rel_mesh[2] + |rel_mesh|[1])
     output_size     = 3   (3D acceleration)
 
 Training target: acc = world_pos_next - 2*world_pos + world_pos_prev   (Verlet)
 Inference:       world_pos_next = 2*world_pos - world_pos_prev + acc
+                 HANDLE nodes pinned to world_pos (boundary condition)
 """
 import torch
 import torch.nn as nn
@@ -17,6 +18,7 @@ from torch_geometric.transforms import FaceToEdge
 
 from .model import EncoderProcesserDecoder
 from utils import normalization
+from utils.utils import NodeType
 
 
 def _init_weights(m):
@@ -31,7 +33,7 @@ class FlagSimulator(nn.Module):
     Cloth simulator: wraps EncoderProcesserDecoder with Verlet integration.
 
     Node input:  12 = (world_pos_t - world_pos_{t-1})[3] + one_hot(node_type, 9)[9]
-    Edge input:   7 = rel_mesh[2] + |rel_mesh|[1] + rel_world[3] + |rel_world|[1]
+    Edge input:   7 = rel_world[3] + |rel_world|[1] + rel_mesh[2] + |rel_mesh|[1]
     Output:       3 = predicted acceleration in 3D
     """
     node_input_size: int = 12
@@ -66,11 +68,11 @@ class FlagSimulator(nn.Module):
         """
         Convert face-based graph to edge-based and build cloth edge features.
 
-        Edge features [E, 7]:
+        Edge features [E, 7] — matches DeepMind cloth_model.py order:
+            rel_world[3]  — relative 3D world-space position (sender - receiver)
+            |rel_world|[1]— norm of rel_world
             rel_mesh[2]   — relative 2D mesh-space position (sender - receiver)
             |rel_mesh|[1] — norm of rel_mesh
-            rel_world[3]  — relative 3D world-space position
-            |rel_world|[1]— norm of rel_world
         """
         graph = self._face_to_edge(graph)
         edge_index = graph.edge_index  # [2, E]
@@ -79,12 +81,13 @@ class FlagSimulator(nn.Module):
         mesh_pos  = graph.pos         # [N, 2]
         world_pos = graph.world_pos   # [N, 3]
 
-        rel_mesh   = mesh_pos[senders]  - mesh_pos[receivers]    # [E, 2]
-        mesh_norm  = torch.norm(rel_mesh,  dim=-1, keepdim=True)  # [E, 1]
         rel_world  = world_pos[senders] - world_pos[receivers]   # [E, 3]
         world_norm = torch.norm(rel_world, dim=-1, keepdim=True)  # [E, 1]
+        rel_mesh   = mesh_pos[senders]  - mesh_pos[receivers]    # [E, 2]
+        mesh_norm  = torch.norm(rel_mesh,  dim=-1, keepdim=True)  # [E, 1]
 
-        edge_attr = torch.cat([rel_mesh, mesh_norm, rel_world, world_norm], dim=-1)  # [E, 7]
+        # DeepMind order: [rel_world_3, |world|_1, rel_mesh_2, |mesh|_1]
+        edge_attr = torch.cat([rel_world, world_norm, rel_mesh, mesh_norm], dim=-1)  # [E, 7]
         graph.edge_attr = edge_attr
         return graph
 
@@ -146,4 +149,8 @@ class FlagSimulator(nn.Module):
         else:
             acc = self._output_normalizer.inverse(predicted_acc_norm)
             next_world_pos = 2.0 * world_pos - prev_world + acc
+            # Pin HANDLE nodes (flag corners) to their current position —
+            # matches DeepMind cloth_eval.py: next_pos = where(mask, prediction, cur_pos)
+            handle_mask = (node_type_col != NodeType.NORMAL).unsqueeze(-1)  # [N, 1]
+            next_world_pos = torch.where(handle_mask, world_pos, next_world_pos)
             return next_world_pos

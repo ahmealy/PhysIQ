@@ -3,17 +3,13 @@ from .blocks import EdgeBlock, NodeBlock
 from torch_geometric.data import Data
 
 def build_mlp(in_size, hidden_size, out_size, lay_norm=True):
-
+    # 2 hidden layers — matches DeepMind MeshGraphNets (num_layers=2, latent_size=128)
     module = nn.Sequential(
-        nn.Linear(in_size, hidden_size), 
-        nn.ReLU(),
-        nn.Linear(hidden_size, hidden_size),
-        nn.ReLU(),
-        nn.Linear(hidden_size, hidden_size),
-        nn.ReLU(),
+        nn.Linear(in_size,     hidden_size), nn.ReLU(),
+        nn.Linear(hidden_size, hidden_size), nn.ReLU(),
         nn.Linear(hidden_size, out_size)
     )
-    if lay_norm: return nn.Sequential(module,  nn.LayerNorm(normalized_shape=out_size))
+    if lay_norm: return nn.Sequential(module, nn.LayerNorm(normalized_shape=out_size))
     return module
 
 

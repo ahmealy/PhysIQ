@@ -150,8 +150,11 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
         if domain == 'flag_simple':
             predicted_acc, target_acc = model(graph)
             # Cloth: loss on NORMAL nodes only
+            # DeepMind formula: mean_over_nodes( sum_over_xyz( err² ) )
             node_type = graph.x[:, 3].long()
             mask = (node_type == NodeType.NORMAL)
+            errors = ((predicted_acc - target_acc) ** 2)[mask]  # [N_normal, 3]
+            loss = torch.mean(torch.sum(errors, dim=-1))         # sum xyz, mean nodes
         else:
             from utils.noise import get_velocity_noise
             velocity_sequence_noise = get_velocity_noise(graph, noise_std=noise_std, device=device)
@@ -161,9 +164,8 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
             predicted_acc, target_acc = model(graph, velocity_sequence_noise)
             node_type = graph.x[:, 0]
             mask = torch.logical_or(node_type == NodeType.NORMAL, node_type == NodeType.OUTFLOW)
-
-        errors = ((predicted_acc - target_acc) ** 2)[mask]
-        loss = torch.mean(errors)
+            errors = ((predicted_acc - target_acc) ** 2)[mask]
+            loss = torch.mean(errors)
 
         optimizer.zero_grad()
         loss.backward()

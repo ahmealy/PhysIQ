@@ -370,10 +370,33 @@ def train_stop():
         stopped = True
     orphan = state.get_orphan_pid()
     if orphan:
-        try:
-            os.kill(orphan, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        # Check if it's a remote nohup job — must kill via SSH
+        remote_pid_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "runs", "train_remote.pid"
+        )
+        is_remote = False
+        if os.path.exists(remote_pid_file):
+            try:
+                is_remote = int(open(remote_pid_file).read().strip()) == orphan
+            except (ValueError, OSError):
+                pass
+        if is_remote:
+            remote_cfg = _load_remote_cfg()
+            if remote_cfg:
+                try:
+                    ssh_prefix = _build_ssh_prefix(remote_cfg)
+                    subprocess.run(
+                        ssh_prefix + [f"kill -TERM {orphan} 2>/dev/null || kill -KILL {orphan} 2>/dev/null"],
+                        capture_output=True, timeout=10
+                    )
+                except Exception:
+                    pass
+        else:
+            try:
+                os.kill(orphan, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         stopped = True
     state.clear_train_pid()
     if not stopped:
@@ -501,10 +524,39 @@ async def list_processes():
 @router.post("/kill/{pid}")
 def kill_process(pid: int):
     """
-    Send SIGTERM to a specific PID. Only kills processes that are train.py invocations.
-    If the PID matches our tracked process, clears state as well.
+    Kill a training process by PID.
+    - Remote nohup jobs (tracked via train_remote.pid): kills via SSH SIGTERM.
+    - Local processes: kills via os.kill after psutil safety check.
     """
-    # Safety: verify the target is actually a train.py process
+    remote_pid_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "runs", "train_remote.pid"
+    )
+
+    # ── Remote nohup job ──────────────────────────────────────────────────────
+    is_remote = False
+    if os.path.exists(remote_pid_file):
+        try:
+            stored = int(open(remote_pid_file).read().strip())
+            if stored == pid:
+                is_remote = True
+        except (ValueError, OSError):
+            pass
+
+    if is_remote:
+        remote_cfg = _load_remote_cfg()
+        if not remote_cfg:
+            raise HTTPException(500, "Remote config not found — cannot SSH-kill")
+        ssh_prefix = _build_ssh_prefix(remote_cfg)
+        kill_cmd = ssh_prefix + [f"kill -TERM {pid} 2>/dev/null || kill -KILL {pid} 2>/dev/null; echo done"]
+        try:
+            result = subprocess.run(kill_cmd, capture_output=True, timeout=10)
+        except Exception as e:
+            raise HTTPException(500, "SSH kill failed: %s" % str(e))
+        state.clear_train_pid()
+        return {"status": "killed", "pid": pid, "method": "ssh"}
+
+    # ── Local process ─────────────────────────────────────────────────────────
     try:
         p = psutil.Process(pid)
         cmd = p.cmdline()
@@ -520,14 +572,13 @@ def kill_process(pid: int):
     except ProcessLookupError:
         raise HTTPException(404, "Process %d already exited" % pid)
 
-    # If this was our managed process, clean up state
     if state.train_process is not None and state.train_process.pid == pid:
         state.train_process = None
     orphan = state.get_orphan_pid()
     if orphan == pid:
         state.clear_train_pid()
 
-    return {"status": "killed", "pid": pid}
+    return {"status": "killed", "pid": pid, "method": "local"}
 
 
 

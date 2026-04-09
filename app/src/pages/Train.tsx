@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Server, CheckCircle2, XCircle, Loader2, Copy, Check } from 'lucide-react';
+import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Server, CheckCircle2, XCircle, Loader2, Copy, Check, Activity, Skull } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export const Train: React.FC = () => {
@@ -26,6 +26,8 @@ export const Train: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const [arch, setArch] = useState('GNS');
   const [remoteActive, setRemoteActive] = useState(false);  // true when training is running on remote GPU
+  const [processes, setProcesses] = useState<any[]>([]);
+  const [killingPid, setKillingPid] = useState<number | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -77,6 +79,33 @@ export const Train: React.FC = () => {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logLines]);
+
+  // Poll process list every 5s (always, not just when running)
+  const fetchProcesses = useCallback(async () => {
+    try {
+      const r = await fetch('/api/train/processes');
+      if (!r.ok) return;
+      const d = await r.json();
+      setProcesses(d.processes || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    fetchProcesses();
+    const t = setInterval(fetchProcesses, 5000);
+    return () => clearInterval(t);
+  }, [fetchProcesses]);
+
+  const handleKill = async (pid: number) => {
+    setKillingPid(pid);
+    try {
+      await fetch(`/api/train/kill/${pid}`, { method: 'POST' });
+      await fetchProcesses();
+      // If this was the managed process, update running state
+      setIsRunning(false);
+    } catch { /* ignore */ }
+    setKillingPid(null);
+  };
 
   const startStreaming = useCallback(() => {
     // No-op if already connected
@@ -565,6 +594,69 @@ export const Train: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Process Manager */}
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-slate-800 flex items-center gap-2">
+              <Activity className="w-3.5 h-3.5 text-slate-500" />
+              <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Running Train Processes</span>
+              {processes.length > 0 && (
+                <span className="px-1.5 py-0.5 bg-green-500/20 text-green-400 text-[9px] font-bold rounded-full">{processes.length}</span>
+              )}
+              <button onClick={fetchProcesses} className="ml-auto text-[9px] text-slate-600 hover:text-slate-400 transition-colors">↺ refresh</button>
+            </div>
+            {processes.length === 0 ? (
+              <div className="px-4 py-3 text-[11px] text-slate-600 italic">No train.py processes found</div>
+            ) : (
+              <div className="divide-y divide-slate-800/60">
+                {processes.map((p) => (
+                  <div key={p.pid} className={`px-4 py-2.5 flex items-center gap-3 text-[11px] ${p.managed ? 'bg-blue-600/5' : ''}`}>
+                    {/* PID + managed badge */}
+                    <div className="w-16 shrink-0">
+                      <span className="font-mono text-slate-400">{p.pid}</span>
+                      {p.managed && <span className="ml-1 px-1 py-0.5 bg-blue-600/20 text-blue-400 text-[8px] font-bold rounded">MGD</span>}
+                    </div>
+                    {/* Domain */}
+                    <div className="w-24 shrink-0">
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${p.domain === 'flag_simple' ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                        {p.domain === 'flag_simple' ? 'CLOTH' : p.domain === 'cylinder_flow' ? 'CFD' : p.domain}
+                      </span>
+                    </div>
+                    {/* Device */}
+                    <div className="w-24 shrink-0">
+                      <span className={`text-[9px] font-bold ${p.device === 'remote GPU' ? 'text-blue-400' : 'text-slate-500'}`}>
+                        {p.device === 'remote GPU' ? '🖥 Remote GPU' : '💻 Local CPU'}
+                      </span>
+                    </div>
+                    {/* Status */}
+                    <div className="w-16 shrink-0">
+                      <span className={`text-[9px] font-bold uppercase ${p.status === 'running' ? 'text-green-400' : p.status === 'sleeping' ? 'text-yellow-500' : 'text-slate-500'}`}>
+                        {p.status}
+                      </span>
+                    </div>
+                    {/* CPU % */}
+                    <div className="w-14 shrink-0 text-slate-400 font-mono">{p.cpu_pct}%</div>
+                    {/* Mem */}
+                    <div className="w-16 shrink-0 text-slate-400 font-mono">{p.mem_mb != null ? `${p.mem_mb} MB` : '—'}</div>
+                    {/* Elapsed */}
+                    <div className="w-20 shrink-0 text-slate-400 font-mono">{p.elapsed}</div>
+                    {/* Kill button */}
+                    <button
+                      onClick={() => handleKill(p.pid)}
+                      disabled={killingPid === p.pid}
+                      className="ml-auto flex items-center gap-1 px-2.5 py-1 bg-red-600/10 hover:bg-red-600/20 disabled:opacity-40 text-red-400 border border-red-500/20 rounded text-[10px] font-bold transition-colors"
+                      title={`Kill PID ${p.pid}`}
+                    >
+                      {killingPid === p.pid
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <Skull className="w-3 h-3" />}
+                      Kill
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
 
           {/* Live Log */}
           {(isRunning || logLines.length > 0) && (

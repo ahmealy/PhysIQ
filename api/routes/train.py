@@ -10,8 +10,10 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 from typing import AsyncGenerator, Literal, Optional
 
+import psutil
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -337,7 +339,125 @@ def train_stop():
     return {"status": "stopped"}
 
 
-@router.get("/status")
+# ── Process manager endpoints ─────────────────────────────────────────────────
+
+def _get_train_processes() -> list[dict]:
+    """
+    Scan all running processes for train.py invocations using psutil.
+    Returns a list of dicts with pid, status, cpu%, memory, elapsed, cmdline, managed.
+    'managed' = True if this is the PID tracked by state.train_process or the pid file.
+    """
+    managed_pid = None
+    if state.train_process is not None and state.train_process.poll() is None:
+        managed_pid = state.train_process.pid
+    if managed_pid is None:
+        managed_pid = state.get_orphan_pid()
+
+    procs = []
+    for p in psutil.process_iter(["pid", "name", "cmdline", "status", "create_time", "cpu_percent", "memory_info"]):
+        try:
+            cmd = p.info["cmdline"] or []
+            # Match any process running train.py (our training script)
+            if not any("train.py" in arg for arg in cmd):
+                continue
+            # Also exclude rollout_ssh.py / rollout.py which may contain "train" in path
+            if any("rollout" in arg for arg in cmd):
+                continue
+
+            create_time = p.info["create_time"]
+            elapsed_s = int(time.time() - create_time)
+            hours, rem = divmod(elapsed_s, 3600)
+            mins, secs = divmod(rem, 60)
+            elapsed_str = "%02d:%02d:%02d" % (hours, mins, secs)
+
+            mem_mb = round(p.info["memory_info"].rss / 1024 / 1024, 1) if p.info["memory_info"] else None
+
+            # Detect device from cmdline or config JSON if available
+            device = "unknown"
+            for i, arg in enumerate(cmd):
+                if arg == "--config" and i + 1 < len(cmd):
+                    try:
+                        with open(cmd[i + 1]) as f:
+                            cfg = json.load(f)
+                        # Training always runs where the server is — check if remote SSH process
+                        device = "remote GPU" if managed_pid and p.pid != managed_pid else "local CPU"
+                    except Exception:
+                        pass
+                    break
+            if device == "unknown":
+                device = "remote GPU" if _load_remote_cfg() else "local CPU"
+
+            # domain from cmdline config
+            domain = "unknown"
+            for i, arg in enumerate(cmd):
+                if arg == "--config" and i + 1 < len(cmd):
+                    try:
+                        with open(cmd[i + 1]) as f:
+                            cfg = json.load(f)
+                        domain = cfg.get("domain", "unknown")
+                    except Exception:
+                        pass
+                    break
+
+            procs.append({
+                "pid":       p.info["pid"],
+                "status":    p.info["status"],
+                "cpu_pct":   round(p.cpu_percent(interval=0.1), 1),
+                "mem_mb":    mem_mb,
+                "elapsed":   elapsed_str,
+                "elapsed_s": elapsed_s,
+                "domain":    domain,
+                "device":    device,
+                "managed":   p.info["pid"] == managed_pid,
+                "cmdline":   " ".join(cmd[:6]),  # truncated for display
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    return sorted(procs, key=lambda x: x["elapsed_s"], reverse=True)
+
+
+@router.get("/processes")
+async def list_processes():
+    """List all running train.py processes with resource usage."""
+    loop = asyncio.get_running_loop()
+    procs = await loop.run_in_executor(None, _get_train_processes)
+    return {"processes": procs}
+
+
+@router.post("/kill/{pid}")
+def kill_process(pid: int):
+    """
+    Send SIGTERM to a specific PID. Only kills processes that are train.py invocations.
+    If the PID matches our tracked process, clears state as well.
+    """
+    # Safety: verify the target is actually a train.py process
+    try:
+        p = psutil.Process(pid)
+        cmd = p.cmdline()
+        if not any("train.py" in arg for arg in cmd):
+            raise HTTPException(403, "PID %d is not a train.py process" % pid)
+    except psutil.NoSuchProcess:
+        raise HTTPException(404, "Process %d not found" % pid)
+    except psutil.AccessDenied:
+        raise HTTPException(403, "Cannot access process %d" % pid)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        raise HTTPException(404, "Process %d already exited" % pid)
+
+    # If this was our managed process, clean up state
+    if state.train_process is not None and state.train_process.pid == pid:
+        state.train_process = None
+    orphan = state.get_orphan_pid()
+    if orphan == pid:
+        state.clear_train_pid()
+
+    return {"status": "killed", "pid": pid}
+
+
+
 async def train_status():
     is_running = (
         (state.train_process is not None and state.train_process.poll() is None)

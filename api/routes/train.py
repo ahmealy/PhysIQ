@@ -291,11 +291,27 @@ def train_start(config: TrainConfig):
     remote_cfg = _load_remote_cfg()
     if remote_cfg:
         # ── Remote GPU execution over SSH ─────────────────────────────────────
-        venv_py   = remote_cfg.get("venv_python", "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python").strip()
-        cfg_abs   = os.path.join(project_root, cfg_path)
+        venv_py    = remote_cfg.get("venv_python", "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python").strip()
+        cfg_abs    = os.path.join(project_root, cfg_path)
         ssh_prefix = _build_ssh_prefix(remote_cfg)
-        # Run train.py on the remote; shared filesystem means both sides see the same files
-        remote_cmd = f"cd {shlex.quote(project_root)} && {shlex.quote(venv_py)} -u train.py --config {shlex.quote(cfg_abs)}"
+        log_abs    = state.train_log_path
+        remote_pid_file = os.path.join(project_root, "runs", "train_remote.pid")
+
+        # Write a bash launcher script on shared NFS — avoids all csh quoting issues.
+        # nohup detaches train.py from the SSH session so it survives server restarts.
+        launcher_path = os.path.join(project_root, "runs", "train_launcher.sh")
+        with open(launcher_path, "w") as lf:
+            lf.write("#!/bin/bash\n")
+            lf.write(f"cd {shlex.quote(project_root)}\n")
+            # Use explicit variable to capture PID reliably
+            lf.write(f"nohup {shlex.quote(venv_py)} -u train.py --config {shlex.quote(cfg_abs)}"
+                     f" >> {shlex.quote(log_abs)} 2>&1 &\n")
+            lf.write("TRAIN_PID=$!\n")
+            lf.write(f"printf '%s' \"$TRAIN_PID\" > {shlex.quote(remote_pid_file)}\n")
+            lf.write("echo REMOTE_PID:$TRAIN_PID\n")
+        os.chmod(launcher_path, 0o755)
+
+        remote_cmd = f"bash {shlex.quote(launcher_path)}"
         cmd = ssh_prefix + [remote_cmd]
         execution = "remote"
     else:
@@ -305,18 +321,42 @@ def train_start(config: TrainConfig):
         cmd = [python_bin, "-u", "train.py", "--config", cfg_path]
         execution = "local"
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        cwd=project_root,
-    )
-    log_file.close()
-    state.train_process = proc
-    state.save_train_pid(proc.pid)
-    state.clear_model_cache()
-
-    return {"pid": proc.pid, "status": "started", "execution": execution}
+    if remote_cfg:
+        # SSH exits immediately (nohup &); capture remote PID from stdout
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=log_file,
+            cwd=project_root,
+        )
+        stdout, _ = proc.communicate(timeout=15)
+        log_file.close()
+        # Parse REMOTE_PID:<n> from output
+        remote_pid = None
+        for line in (stdout or b"").decode(errors="replace").splitlines():
+            if line.startswith("REMOTE_PID:"):
+                try:
+                    remote_pid = int(line.split(":")[1].strip())
+                except ValueError:
+                    pass
+        # Store remote PID in the shared PID file so orphan detection works
+        pid_to_save = remote_pid or 0
+        state.save_train_pid(pid_to_save)
+        state.train_process = None   # SSH proc already exited
+        state.clear_model_cache()
+        return {"pid": remote_pid, "status": "started", "execution": execution}
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=project_root,
+        )
+        log_file.close()
+        state.train_process = proc
+        state.save_train_pid(proc.pid)
+        state.clear_model_cache()
+        return {"pid": proc.pid, "status": "started", "execution": execution}
 
 
 @router.post("/stop")

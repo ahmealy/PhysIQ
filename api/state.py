@@ -6,6 +6,7 @@ Single module so all routers share the same objects without circular imports.
 import os
 import subprocess
 import threading
+import time
 from typing import Optional
 import torch
 
@@ -18,33 +19,68 @@ train_log_path: str = os.path.join(_project_root, "runs", "train_ui.log")
 # PID file — written when training starts, deleted when it ends.
 # Survives uvicorn restarts so we can detect orphaned processes.
 _train_pid_file: str = os.path.join(_project_root, "runs", "train_ui.pid")
+# Remote PID file written by the nohup & launch on the GPU host (shared NFS).
+_train_remote_pid_file: str = os.path.join(_project_root, "runs", "train_remote.pid")
 
 
 def save_train_pid(pid: int) -> None:
-    os.makedirs("runs", exist_ok=True)
+    os.makedirs(os.path.join(_project_root, "runs"), exist_ok=True)
     with open(_train_pid_file, "w") as f:
         f.write(str(pid))
 
 
 def clear_train_pid() -> None:
-    try:
-        os.remove(_train_pid_file)
-    except FileNotFoundError:
-        pass
+    for path in (_train_pid_file, _train_remote_pid_file):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 def get_orphan_pid() -> Optional[int]:
-    """Return PID of a training process that outlived a uvicorn restart, or None."""
+    """Return a truthy sentinel if a training process is still running, or None.
+
+    For local processes: checks the PID file with os.kill(0).
+    For remote SSH processes: the remote PID can't be checked with os.kill
+    (wrong host), so instead we check:
+      1. train_remote.pid file exists (written by nohup launcher)
+      2. The training log was modified within the last 30 seconds
+         OR the log is actively growing (mtime recent relative to file age)
+    If the log hasn't been touched for >120s and remote pid file exists,
+    we assume it finished or died and clean up.
+    """
+    # Check remote PID file first
+    if os.path.exists(_train_remote_pid_file):
+        try:
+            remote_pid = int(open(_train_remote_pid_file).read().strip())
+            if remote_pid > 0:
+                # Can't os.kill a remote PID — use log freshness instead
+                log_age = (
+                    time.time() - os.path.getmtime(train_log_path)
+                    if os.path.exists(train_log_path) else 9999
+                )
+                if log_age < 120:
+                    # Log updated recently — training is alive
+                    return remote_pid
+                # Log stale for >120s — training likely finished/died
+                clear_train_pid()
+                return None
+        except (ValueError, OSError):
+            clear_train_pid()
+            return None
+
+    # Fall back to local SSH/process PID
     if not os.path.exists(_train_pid_file):
         return None
     try:
         pid = int(open(_train_pid_file).read().strip())
-        # Check if process is actually alive
-        os.kill(pid, 0)   # signal 0 = existence check, raises if gone
-        return pid
+        if pid > 0:
+            os.kill(pid, 0)
+            return pid
     except (ValueError, ProcessLookupError, PermissionError):
-        clear_train_pid()
-        return None
+        pass
+    clear_train_pid()
+    return None
 
 # ── Loaded model cache ────────────────────────────────────────────────────────
 # Keyed by (checkpoint_path, device) so we reload only when needed

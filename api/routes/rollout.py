@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import pickle
+import shlex
+import subprocess
 import sys
 import time
 from typing import AsyncGenerator
@@ -20,6 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from api.state import DOMAINS, get_model
+from api.routes.train import _load_remote_cfg, _build_ssh_prefix
 from dataset import FpcDataset
 from utils.utils import NodeType
 
@@ -298,9 +301,11 @@ async def run_rollout(req: RolloutRequest):
     """
     Runs autoregressive rollout and streams progress via SSE.
 
-    The heavy GNN inference loop runs in a thread (via run_in_executor)
-    so the asyncio event loop stays responsive during the entire rollout.
-    Progress events are passed back to the async generator via an asyncio.Queue.
+    If a remote GPU SSH config is saved (runs/remote_gpu.json), the rollout
+    is executed on the remote host via SSH using rollout_ssh.py.
+    Otherwise it runs locally in a thread via run_in_executor.
+
+    Progress events are streamed back to the browser as SSE events.
     """
     if req.domain not in DOMAINS:
         raise HTTPException(404, "Unknown domain: %s" % req.domain)
@@ -312,6 +317,84 @@ async def run_rollout(req: RolloutRequest):
     if not os.path.exists(cfg["checkpoint"]):
         raise HTTPException(404, "No checkpoint at %s. Train first." % cfg["checkpoint"])
 
+    # ── Remote GPU path ───────────────────────────────────────────────────────
+    remote_cfg = _load_remote_cfg()
+    if remote_cfg:
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        # Write rollout config JSON for rollout_ssh.py to read
+        os.makedirs("runs", exist_ok=True)
+        rollout_cfg_path = os.path.join(project_root, "runs", "ui_rollout_config.json")
+        with open(rollout_cfg_path, "w") as f:
+            json.dump({
+                "domain":            req.domain,
+                "trajectory_index":  req.trajectory_index,
+                "split":             req.split,
+                "device":            "cuda:0",  # always use GPU on remote host
+            }, f)
+
+        venv_py    = remote_cfg.get("venv_python", "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python").strip()
+        ssh_prefix = _build_ssh_prefix(remote_cfg)
+        script_path = os.path.join(project_root, "rollout_ssh.py")
+        remote_cmd  = (
+            "cd %s && %s -u %s --config %s"
+            % (
+                shlex.quote(project_root),
+                shlex.quote(venv_py),
+                shlex.quote(script_path),
+                shlex.quote(rollout_cfg_path),
+            )
+        )
+        cmd = ssh_prefix + [remote_cmd]
+
+        async def generate_ssh() -> AsyncGenerator[str, None]:
+            loop = asyncio.get_running_loop()
+            proc = await loop.run_in_executor(
+                None,
+                lambda: subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            )
+            try:
+                # Read stdout line-by-line; each SSE line from rollout_ssh.py
+                # is already in the "data: {...}\n" format — forward verbatim.
+                while True:
+                    line = await loop.run_in_executor(None, proc.stdout.readline)
+                    if not line:
+                        break
+                    line = line.rstrip("\n")
+                    if line.startswith("data: "):
+                        yield line + "\n\n"
+                        # Check if this was the terminal event
+                        try:
+                            payload = json.loads(line[6:])
+                            if payload.get("type") in ("done", "error"):
+                                break
+                        except Exception:
+                            pass
+                # If process exited without a done/error event, emit error
+                rc = await loop.run_in_executor(None, proc.wait)
+                if rc != 0:
+                    yield "data: %s\n\n" % json.dumps({
+                        "type":    "error",
+                        "message": "Remote rollout exited with code %d" % rc,
+                    })
+            except Exception as e:
+                yield "data: %s\n\n" % json.dumps({"type": "error", "message": str(e)})
+            finally:
+                proc.stdout.close()
+                proc.wait()
+
+        return StreamingResponse(
+            generate_ssh(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── Local execution path ──────────────────────────────────────────────────
     # Validate device
     device = req.device
     if device.startswith("cuda") and not torch.cuda.is_available():

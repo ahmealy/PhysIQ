@@ -25,6 +25,7 @@ export const Train: React.FC = () => {
   const [logPath, setLogPath] = useState<string>('runs/train_ui.log');
   const [copied, setCopied] = useState(false);
   const [arch, setArch] = useState('GNS');
+  const [remoteActive, setRemoteActive] = useState(false);  // true when training is running on remote GPU
   const eventSourceRef = useRef<EventSource | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -147,6 +148,8 @@ export const Train: React.FC = () => {
         setEpochs(data.epochs || []);
         if (data.best_epoch) setBestEpoch({ epoch: data.best_epoch, valid_loss: data.best_valid_loss });
         if (data.log_path) setLogPath(data.log_path);
+        // Track whether training is executing on the remote GPU
+        if (data.running) setRemoteActive(!!data.remote);
         // Restore accurate elapsed time from log file creation timestamp
         if (data.log_start_ms && data.running) {
           setStartTime(data.log_start_ms);
@@ -179,6 +182,7 @@ export const Train: React.FC = () => {
       setStartTime(Date.now());
       setElapsed(0);
       setLogLines(['--- Training started ---']);
+      setRemoteActive(remoteEnabled && !!remote.host);
       startStreaming();
     } else {
       const err = await res.json().catch(() => ({}));
@@ -511,7 +515,7 @@ export const Train: React.FC = () => {
             </div>
           </section>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-4 gap-4">
             <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
               <div className="w-10 h-10 bg-slate-950 rounded-lg flex items-center justify-center text-slate-400">
                 <Clock className="w-5 h-5" />
@@ -543,6 +547,20 @@ export const Train: React.FC = () => {
                 </p>
               </div>
             </div>
+            <div className={`border p-4 rounded-xl flex items-center gap-4 ${remoteActive || (isRunning && remoteEnabled) ? 'bg-blue-600/10 border-blue-500/20' : 'bg-slate-900/50 border-slate-800'}`}>
+              <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${remoteActive || (isRunning && remoteEnabled) ? 'bg-blue-600/20 text-blue-400' : 'bg-slate-950 text-slate-400'}`}>
+                <Server className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase text-slate-500 font-bold">Compute</p>
+                <p className={`text-sm font-semibold font-mono ${remoteActive || (isRunning && remoteEnabled) ? 'text-blue-300' : 'text-slate-400'}`}>
+                  {remoteActive || (isRunning && remoteEnabled) ? 'Remote GPU' : 'Local CPU'}
+                </p>
+                {(remoteActive || (isRunning && remoteEnabled)) && remote.host && (
+                  <p className="text-[9px] text-blue-500/70 font-mono truncate max-w-[100px]">{remote.host}</p>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Live Log */}
@@ -551,6 +569,11 @@ export const Train: React.FC = () => {
               <div className="px-4 py-2.5 border-b border-slate-800 flex items-center gap-2">
                 <Terminal className="w-3.5 h-3.5 text-slate-500" />
                 <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Training Log</span>
+                {(remoteActive || (isRunning && remoteEnabled)) ? (
+                  <span className="px-1.5 py-0.5 bg-blue-600/20 text-blue-400 text-[9px] font-bold rounded uppercase tracking-wider">Remote GPU</span>
+                ) : isRunning ? (
+                  <span className="px-1.5 py-0.5 bg-slate-800 text-slate-500 text-[9px] font-bold rounded uppercase tracking-wider">Local CPU</span>
+                ) : null}
                 <span className="text-[10px] font-mono text-slate-700 ml-1 truncate max-w-[200px]">{logPath}</span>
                 <button
                   onClick={handleCopyLog}

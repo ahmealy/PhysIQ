@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Loader2, CheckCircle2, ArrowRight, History, Database, Info, Cpu } from 'lucide-react';
+import { Play, Loader2, CheckCircle2, ArrowRight, History, Database, Info, Cpu, Server } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 
 export const Predict: React.FC = () => {
@@ -8,6 +8,7 @@ export const Predict: React.FC = () => {
   const [results, setResults] = useState<any[]>([]);
   const [domain, setDomain] = useState('cylinder_flow');
   const [checkpoint, setCheckpoint] = useState<any>(null);
+  const [checkpointLoading, setCheckpointLoading] = useState(false);
   const [trajectoryIndex, setTrajectoryIndex] = useState(0);
   const [device, setDevice] = useState('cpu');
   const [isRunning, setIsRunning] = useState(false);
@@ -18,6 +19,7 @@ export const Predict: React.FC = () => {
   const [rolloutResult, setRolloutResult] = useState<any>(null);
   const [gpuStatus, setGpuStatus] = useState<any>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [remoteConfig, setRemoteConfig] = useState<{ enabled: boolean; host: string } | null>(null);
   // Keep isRunning in a ref so the fetch loop sees the latest value after navigation
   const isRunningRef = useRef(false);
   const navigate = useNavigate();
@@ -36,15 +38,19 @@ export const Predict: React.FC = () => {
     fetch('/api/dataset/info').then(r => r.json()).then(setDatasetInfo).catch(() => {});
     fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
     fetch('/api/status/gpu').then(r => r.json()).then(setGpuStatus).catch(() => {});
+    fetch('/api/train/remote').then(r => r.ok ? r.json() : null).then(d => {
+      if (d && d.enabled && d.host) setRemoteConfig(d);
+    }).catch(() => {});
   }, []);
 
   // Load checkpoint info when domain changes
   useEffect(() => {
+    setCheckpointLoading(true);
     setCheckpoint(null);
     fetch(`/api/checkpoint?domain=${domain}`)
       .then(r => r.ok ? r.json() : null)
-      .then(setCheckpoint)
-      .catch(() => setCheckpoint(null));
+      .then(d => { setCheckpoint(d); setCheckpointLoading(false); })
+      .catch(() => { setCheckpoint(null); setCheckpointLoading(false); });
     // Also reload dataset info for the selected domain
     fetch(`/api/dataset/info?domain=${domain}`)
       .then(r => r.ok ? r.json() : null)
@@ -164,7 +170,12 @@ export const Predict: React.FC = () => {
               </div>
 
               {/* Champion model card */}
-              {checkpoint ? (
+              {checkpointLoading ? (
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-slate-500 text-xs">
+                  <div className="w-3 h-3 border-2 border-slate-700 border-t-slate-400 rounded-full animate-spin shrink-0" />
+                  Loading model info…
+                </div>
+              ) : checkpoint ? (
                 <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -202,9 +213,9 @@ export const Predict: React.FC = () => {
                   This domain has no trained model yet
                 </div>
               ) : (
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-slate-500 text-xs">
-                  <div className="w-3 h-3 border-2 border-slate-700 border-t-slate-400 rounded-full animate-spin shrink-0" />
-                  Loading model info…
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-xs">
+                  <Database className="w-4 h-4 shrink-0 text-yellow-600" />
+                  <span className="text-yellow-600">No trained model found — train first</span>
                 </div>
               )}
 
@@ -256,10 +267,22 @@ export const Predict: React.FC = () => {
                 {!statusLoaded && (
                   <p className="text-[10px] text-slate-500">Detecting GPU…</p>
                 )}
-                {statusLoaded && !status?.gpu_available && (
+                {statusLoaded && !status?.gpu_available && !remoteConfig && (
                   <p className="text-[10px] text-yellow-600">No GPU detected — will run on CPU (slower)</p>
                 )}
               </div>
+
+              {/* Remote GPU banner — shown when SSH is configured */}
+              {remoteConfig && (
+                <div className="flex items-center gap-2 p-3 bg-blue-600/10 border border-blue-500/20 rounded-lg">
+                  <Server className="w-4 h-4 text-blue-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[11px] text-blue-300 font-bold">Remote GPU Enabled</p>
+                    <p className="text-[10px] text-blue-400/70 font-mono truncate">{remoteConfig.host}</p>
+                  </div>
+                  <span className="px-1.5 py-0.5 bg-blue-600/30 text-blue-300 text-[9px] font-bold rounded uppercase">cuda:0</span>
+                </div>
+              )}
 
               {/* Error message */}
               {errorMsg && (
@@ -270,7 +293,7 @@ export const Predict: React.FC = () => {
 
               <button
                 onClick={handleStartRollout}
-                disabled={isRunning || !statusLoaded || !checkpoint}
+                disabled={isRunning || checkpointLoading || !checkpoint}
                 className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/20"
               >
                 {isRunning ? (

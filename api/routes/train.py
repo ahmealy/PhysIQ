@@ -384,8 +384,8 @@ def train_stop():
 def _get_train_processes() -> list[dict]:
     """
     Scan all running processes for train.py invocations using psutil.
-    Returns a list of dicts with pid, status, cpu%, memory, elapsed, cmdline, managed.
-    'managed' = True if this is the PID tracked by state.train_process or the pid file.
+    Also injects a synthetic entry for remote nohup jobs tracked via
+    runs/train_remote.pid + log freshness.
     """
     managed_pid = None
     if state.train_process is not None and state.train_process.poll() is None:
@@ -394,6 +394,52 @@ def _get_train_processes() -> list[dict]:
         managed_pid = state.get_orphan_pid()
 
     procs = []
+
+    # ── Remote nohup job (no local psutil entry) ──────────────────────────────
+    remote_pid_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "runs", "train_remote.pid"
+    )
+    if os.path.exists(remote_pid_file):
+        try:
+            remote_pid = int(open(remote_pid_file).read().strip())
+            log_path   = state.train_log_path
+            log_mtime  = os.path.getmtime(log_path) if os.path.exists(log_path) else 0
+            log_age    = time.time() - log_mtime
+            if remote_pid > 0 and log_age < 120:
+                # Build elapsed from log file creation time
+                log_ctime  = os.path.getctime(log_path) if os.path.exists(log_path) else time.time()
+                elapsed_s  = int(time.time() - log_ctime)
+                hours, rem = divmod(elapsed_s, 3600)
+                mins, secs = divmod(rem, 60)
+                elapsed_str = "%02d:%02d:%02d" % (hours, mins, secs)
+                # Read domain from active config
+                domain = "unknown"
+                cfg_path = os.path.join(
+                    os.path.dirname(remote_pid_file), "ui_train_config.json"
+                )
+                try:
+                    with open(cfg_path) as f:
+                        domain = json.load(f).get("domain", "unknown")
+                except Exception:
+                    pass
+                remote_cfg = _load_remote_cfg()
+                procs.append({
+                    "pid":       remote_pid,
+                    "status":    "running",
+                    "cpu_pct":   None,   # can't measure remote CPU locally
+                    "mem_mb":    None,
+                    "elapsed":   elapsed_str,
+                    "elapsed_s": elapsed_s,
+                    "domain":    domain,
+                    "device":    "remote GPU (%s)" % remote_cfg.get("host", "?") if remote_cfg else "remote GPU",
+                    "managed":   True,
+                    "cmdline":   "train.py (nohup, remote)",
+                })
+        except (ValueError, OSError):
+            pass
+
+    # ── Local psutil scan ─────────────────────────────────────────────────────
     for p in psutil.process_iter(["pid", "name", "cmdline", "status", "create_time", "cpu_percent", "memory_info"]):
         try:
             cmd = p.info["cmdline"] or []
@@ -412,22 +458,7 @@ def _get_train_processes() -> list[dict]:
 
             mem_mb = round(p.info["memory_info"].rss / 1024 / 1024, 1) if p.info["memory_info"] else None
 
-            # Detect device from cmdline or config JSON if available
-            device = "unknown"
-            for i, arg in enumerate(cmd):
-                if arg == "--config" and i + 1 < len(cmd):
-                    try:
-                        with open(cmd[i + 1]) as f:
-                            cfg = json.load(f)
-                        # Training always runs where the server is — check if remote SSH process
-                        device = "remote GPU" if managed_pid and p.pid != managed_pid else "local CPU"
-                    except Exception:
-                        pass
-                    break
-            if device == "unknown":
-                device = "remote GPU" if _load_remote_cfg() else "local CPU"
-
-            # domain from cmdline config
+            device = "local CPU"
             domain = "unknown"
             for i, arg in enumerate(cmd):
                 if arg == "--config" and i + 1 < len(cmd):
@@ -449,7 +480,7 @@ def _get_train_processes() -> list[dict]:
                 "domain":    domain,
                 "device":    device,
                 "managed":   p.info["pid"] == managed_pid,
-                "cmdline":   " ".join(cmd[:6]),  # truncated for display
+                "cmdline":   " ".join(cmd[:6]),
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue

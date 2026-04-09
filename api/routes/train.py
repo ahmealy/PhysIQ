@@ -154,20 +154,40 @@ def test_remote(cfg: RemoteConfig):
     Test SSH connectivity and verify the venv Python exists on the remote.
     Returns {ok: bool, message: str}.
     """
-    ssh_prefix = _build_ssh_prefix(cfg.model_dump())
     venv_py = cfg.venv_python.strip()
 
     try:
-        # Run python --version and torch GPU check with explicit markers
-        # immune to login-shell noise (e.g. /etc/profile printing warnings).
+        # Write a small probe script to the shared filesystem so we can run it
+        # as a file rather than via -c '...' (some remote shells mangle single-quoted
+        # inline code when commands are chained, causing silent empty output).
+        probe_path = os.path.join("runs", "gpu_probe.py")
+        os.makedirs("runs", exist_ok=True)
+        with open(probe_path, "w") as fp:
+            fp.write(
+                "import sys\n"
+                "sys.stdout.reconfigure(line_buffering=True)\n"
+                "try:\n"
+                "    import torch\n"
+                "    if torch.cuda.is_available():\n"
+                "        print('GPU:' + torch.cuda.get_device_name(0))\n"
+                "    else:\n"
+                "        print('no-gpu')\n"
+                "except Exception as e:\n"
+                "    print('probe-error:' + str(e))\n"
+            )
+
+        probe_abs = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            probe_path,
+        )
+        ssh_prefix = _build_ssh_prefix(cfg.model_dump())
         remote_cmd = (
-            f"echo __PYTHON__; {shlex.quote(venv_py)} --version 2>&1; "
-            f"echo __GPU__; {shlex.quote(venv_py)} -c "
-            f"\"import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-gpu')\" 2>/dev/null || echo no-gpu"
+            f"echo __PYTHON__; {shlex.quote(venv_py)} --version; "
+            f"echo __GPU__; {shlex.quote(venv_py)} -u {shlex.quote(probe_abs)}"
         )
         result = subprocess.run(
             ssh_prefix + [remote_cmd],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=20,
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()
@@ -192,8 +212,11 @@ def test_remote(cfg: RemoteConfig):
             if section == "python" and line:
                 python_ver = line
                 section = None  # only take first non-empty line
-            elif section == "gpu" and line and line != "no-gpu":
-                gpu_line = line
+            elif section == "gpu" and line:
+                if line.startswith("GPU:"):
+                    gpu_line = line[4:]   # strip "GPU:" prefix written by probe script
+                elif line not in ("no-gpu",) and not line.startswith("probe-error:"):
+                    gpu_line = line       # fallback: bare GPU name
                 break
 
         msg = f"Connected ✓  {python_ver}"

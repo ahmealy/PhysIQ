@@ -30,7 +30,7 @@ export const Predict: React.FC = () => {
   useEffect(() => {
     fetch('/api/status').then(r => r.json()).then(s => {
       setStatus(s);
-      // Prefer cuda if GPU is available, otherwise default to cpu
+      // Prefer cuda if GPU is available locally — remote config overrides below
       if (s.gpu_available) setDevice('cuda:0');
       setStatusLoaded(true);
     }).catch(() => setStatusLoaded(true));
@@ -39,7 +39,10 @@ export const Predict: React.FC = () => {
     fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
     fetch('/api/status/gpu').then(r => r.json()).then(setGpuStatus).catch(() => {});
     fetch('/api/train/remote').then(r => r.ok ? r.json() : null).then(d => {
-      if (d && d.enabled && d.host) setRemoteConfig(d);
+      if (d && d.enabled && d.host) {
+        setRemoteConfig(d);
+        setDevice('cuda:0');  // remote host always has GPU — default to it
+      }
     }).catch(() => {});
   }, []);
 

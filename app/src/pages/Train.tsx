@@ -160,6 +160,9 @@ export const Train: React.FC = () => {
           setIsRunning(true);
           setStartTime(prev => prev ?? Date.now());
           startStreaming();
+        } else {
+          // Training is not running — make sure button shows correctly
+          setIsRunning(false);
         }
         setStatusLoaded(true);
       })

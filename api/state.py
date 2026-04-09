@@ -11,11 +11,13 @@ import torch
 
 # ── Training state ────────────────────────────────────────────────────────────
 train_process: Optional[subprocess.Popen] = None
-train_log_path: str = "runs/train_ui.log"
+# Use absolute path so the log path shown in the UI is copy-pasteable
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+train_log_path: str = os.path.join(_project_root, "runs", "train_ui.log")
 
 # PID file — written when training starts, deleted when it ends.
 # Survives uvicorn restarts so we can detect orphaned processes.
-_train_pid_file: str = "runs/train_ui.pid"
+_train_pid_file: str = os.path.join(_project_root, "runs", "train_ui.pid")
 
 
 def save_train_pid(pid: int) -> None:

@@ -222,8 +222,10 @@ if __name__ == '__main__':
 
     simulator.to(device)
 
-    # Resume from checkpoint if it exists
-    checkpoint_path = os.path.join(checkpoint_dir, "best_model.pth")
+    # Resume from checkpoint if it exists — use domain-specific filename to
+    # avoid collisions between cylinder_flow and flag_simple checkpoints.
+    ckpt_filename = "flag_best_model.pth" if domain == "flag_simple" else "best_model.pth"
+    checkpoint_path = os.path.join(checkpoint_dir, ckpt_filename)
     start_epoch, best_valid_loss = load_checkpoint(checkpoint_path, simulator, optimizer, device)
     best_epoch = start_epoch - 1
     epochs_no_improve = 0

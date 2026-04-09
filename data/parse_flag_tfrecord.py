@@ -7,10 +7,15 @@ Usage:
 
 Requires: tensorflow<1.15, data_flag/{train,valid,test}.tfrecord
 
-Outputs per split:
-    data_flag/{split}_pos.npz   — world_pos [T, N, 3] per trajectory, stacked
-    data_flag/{split}_mesh.npz  — mesh_pos [N, 2], node_type [N, 1], cells [F, 3]
-                                   (per trajectory, stored as ragged lists)
+Outputs — one .npz per trajectory, streamed to disk:
+    data_flag/{split}/traj_{i:05d}.npz  contains:
+        world_pos  [T, N, 3]  float32
+        mesh_pos   [N, 2]     float32
+        node_type  [N, 1]     int32
+        cells      [F, 3]     int32
+
+Index files (tiny — one int per trajectory):
+    data_flag/{split}_index.npz  — n_traj, steps_per_traj array
 """
 import functools
 import json
@@ -74,57 +79,56 @@ def load_dataset(split, data_dir=DATA_DIR):
 
 
 def parse_split(split: str, data_dir: str = DATA_DIR):
-    """Parse one split and write output files. Idempotent (skips if already exists)."""
-    pos_path  = os.path.join(data_dir, f"{split}_pos.npz")
-    mesh_path = os.path.join(data_dir, f"{split}_mesh.npz")
+    """Parse one split, writing one .npz per trajectory. Idempotent via index file."""
+    split_dir  = os.path.join(data_dir, split)
+    index_path = os.path.join(data_dir, f"{split}_index.npz")
 
-    if os.path.exists(pos_path) and os.path.exists(mesh_path):
-        print(f"[{split}] Output files already exist, skipping.")
+    if os.path.exists(index_path):
+        print(f"[{split}] Index already exists, skipping.")
         return
 
-    print(f"[{split}] Parsing...")
-    ds = load_dataset(split, data_dir=data_dir)
+    os.makedirs(split_dir, exist_ok=True)
+    print(f"[{split}] Parsing — streaming one .npz per trajectory to {split_dir}/")
 
-    all_world_pos  = []  # list of [T, N, 3] per trajectory
-    all_mesh_pos   = []  # list of [N, 2] per trajectory
-    all_node_type  = []  # list of [N, 1] per trajectory
-    all_cells      = []  # list of [F, 3] per trajectory
+    ds = load_dataset(split, data_dir=data_dir)
+    steps_per_traj = []
 
     for idx, d in enumerate(ds):
-        world_pos  = d["world_pos"].numpy()    # [T, N, 3]
-        mesh_pos   = d["mesh_pos"].numpy()[0]  # [N, 2] — static, use step 0
-        node_type  = d["node_type"].numpy()[0] # [N, 1] — static, use step 0
-        cells      = d["cells"].numpy()[0]     # [F, 3] — static, use step 0
+        world_pos = d["world_pos"].numpy()    # [T, N, 3]
+        mesh_pos  = d["mesh_pos"].numpy()[0]  # [N, 2] — static, step 0
+        node_type = d["node_type"].numpy()[0] # [N, 1] — static, step 0
+        cells     = d["cells"].numpy()[0]     # [F, 3] — static, step 0
 
-        all_world_pos.append(world_pos)
-        all_mesh_pos.append(mesh_pos)
-        all_node_type.append(node_type)
-        all_cells.append(cells)
+        traj_path = os.path.join(split_dir, f"traj_{idx:05d}.npz")
+        # np.savez_compressed appends .npz automatically, so use a tmp stem without .npz
+        traj_tmp_stem = os.path.join(split_dir, f"traj_{idx:05d}.tmp")
+        np.savez_compressed(
+            traj_tmp_stem,
+            world_pos=world_pos.astype(np.float32),
+            mesh_pos=mesh_pos.astype(np.float32),
+            node_type=node_type.astype(np.int32),
+            cells=cells.astype(np.int32),
+        )
+        # np.savez_compressed writes to traj_tmp_stem + ".npz"
+        os.replace(traj_tmp_stem + ".npz", traj_path)
+
+        steps_per_traj.append(world_pos.shape[0])  # T
 
         if idx % 10 == 0:
-            print(f"  [{split}] Parsed {idx} trajectories...")
+            print(f"  [{split}] {idx} trajectories written...")
 
-    print(f"[{split}] {len(all_world_pos)} trajectories parsed.")
+    n_traj = len(steps_per_traj)
+    print(f"[{split}] {n_traj} trajectories parsed.")
 
-    # Save world_pos as ragged (different N per trajectory possible)
-    # Use object dtype arrays for ragged storage
-    # Atomic write: write to .tmp files then rename to avoid partial-write corruption
-    pos_path_tmp  = pos_path  + ".tmp"
-    mesh_path_tmp = mesh_path + ".tmp"
-
+    # Write index file — tiny, marks split as complete
+    index_tmp_stem = index_path[:-4] + ".tmp"  # strip .npz, add .tmp stem
     np.savez_compressed(
-        pos_path_tmp,
-        world_pos=np.array(all_world_pos, dtype=object),  # [n_traj] of [T, N, 3]
+        index_tmp_stem,
+        n_traj=np.array(n_traj, dtype=np.int64),
+        steps_per_traj=np.array(steps_per_traj, dtype=np.int32),
     )
-    np.savez_compressed(
-        mesh_path_tmp,
-        mesh_pos=np.array(all_mesh_pos, dtype=object),    # [n_traj] of [N, 2]
-        node_type=np.array(all_node_type, dtype=object),  # [n_traj] of [N, 1]
-        cells=np.array(all_cells, dtype=object),          # [n_traj] of [F, 3]
-    )
-    os.replace(pos_path_tmp,  pos_path)
-    os.replace(mesh_path_tmp, mesh_path)
-    print(f"[{split}] Saved to {pos_path} and {mesh_path}")
+    os.replace(index_tmp_stem + ".npz", index_path)
+    print(f"[{split}] Index written to {index_path}")
 
 
 if __name__ == "__main__":

@@ -11,36 +11,44 @@ DATA_DIR = "data_flag"
 
 
 @pytest.mark.skipif(
-    not os.path.exists(os.path.join(DATA_DIR, "train_pos.npz")),
-    reason="data_flag/train_pos.npz not present — run parse_flag_tfrecord.py first",
+    not os.path.exists(os.path.join(DATA_DIR, "train_index.npz")),
+    reason="data_flag/train_index.npz not present — run parse_flag_tfrecord.py first",
 )
-def test_train_pos_structure():
-    data = np.load(os.path.join(DATA_DIR, "train_pos.npz"), allow_pickle=True)
-    world_pos = data["world_pos"]
-    # Object array of trajectories
-    assert world_pos.dtype == object
-    assert len(world_pos) > 0
-    # First trajectory: [T, N, 3]
-    first = world_pos[0]
-    assert first.ndim == 3
-    assert first.shape[2] == 3   # 3D positions
+def test_train_index_structure():
+    idx = np.load(os.path.join(DATA_DIR, "train_index.npz"))
+    assert "n_traj" in idx
+    assert "steps_per_traj" in idx
+    n_traj = int(idx["n_traj"])
+    assert n_traj > 0
+    steps = idx["steps_per_traj"]
+    assert len(steps) == n_traj
+    assert all(s > 1 for s in steps), "All trajectories must have T > 1"
 
 
 @pytest.mark.skipif(
-    not os.path.exists(os.path.join(DATA_DIR, "train_mesh.npz")),
-    reason="data_flag/train_mesh.npz not present — run parse_flag_tfrecord.py first",
+    not os.path.exists(os.path.join(DATA_DIR, "train_index.npz")),
+    reason="data_flag/train_index.npz not present — run parse_flag_tfrecord.py first",
 )
-def test_train_mesh_structure():
-    data = np.load(os.path.join(DATA_DIR, "train_mesh.npz"), allow_pickle=True)
-    mesh_pos  = data["mesh_pos"]
-    node_type = data["node_type"]
-    cells     = data["cells"]
+def test_first_train_trajectory_structure():
+    traj_path = os.path.join(DATA_DIR, "train", "traj_00000.npz")
+    assert os.path.exists(traj_path), f"First trajectory file missing: {traj_path}"
 
-    assert mesh_pos.dtype == object
-    first_mesh = mesh_pos[0]
-    assert first_mesh.ndim == 2
-    assert first_mesh.shape[1] == 2   # 2D rest coords
+    traj = np.load(traj_path)
+    assert "world_pos" in traj
+    assert "mesh_pos"  in traj
+    assert "node_type" in traj
+    assert "cells"     in traj
 
-    first_cells = cells[0]
-    assert first_cells.ndim == 2
-    assert first_cells.shape[1] == 3  # triangles
+    world_pos = traj["world_pos"]    # [T, N, 3]
+    mesh_pos  = traj["mesh_pos"]     # [N, 2]
+    node_type = traj["node_type"]    # [N, 1]
+    cells     = traj["cells"]        # [F, 3]
+
+    assert world_pos.ndim == 3
+    assert world_pos.shape[2] == 3        # 3D positions
+    assert world_pos.dtype == np.float32
+
+    N = world_pos.shape[1]
+    assert mesh_pos.shape == (N, 2)       # 2D rest coords
+    assert node_type.shape[1] == 1        # scalar type per node
+    assert cells.shape[1] == 3            # triangles

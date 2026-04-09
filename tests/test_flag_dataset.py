@@ -6,18 +6,33 @@ from torch_geometric.data import Data
 
 
 def _make_fake_data(data_dir: str, n_traj: int = 2, T: int = 10, N: int = 15, F: int = 20):
-    """Write synthetic flag data files matching the parse_flag_tfrecord.py output format."""
-    os.makedirs(data_dir, exist_ok=True)
-    world_pos = np.array([
-        np.random.randn(T, N, 3).astype(np.float32) for _ in range(n_traj)
-    ], dtype=object)
-    np.savez_compressed(os.path.join(data_dir, "train_pos.npz"), world_pos=world_pos)
+    """Write synthetic flag data files matching the parse_flag_tfrecord.py output format.
 
-    mesh_pos  = np.array([np.random.randn(N, 2).astype(np.float32)  for _ in range(n_traj)], dtype=object)
-    node_type = np.array([np.zeros((N, 1), dtype=np.int32)           for _ in range(n_traj)], dtype=object)
-    cells     = np.array([np.random.randint(0, N, (F, 3)).astype(np.int64) for _ in range(n_traj)], dtype=object)
-    np.savez_compressed(os.path.join(data_dir, "train_mesh.npz"),
-                        mesh_pos=mesh_pos, node_type=node_type, cells=cells)
+    New format: one .npz per trajectory in {data_dir}/train/, plus an index file.
+    """
+    split_dir = os.path.join(data_dir, "train")
+    os.makedirs(split_dir, exist_ok=True)
+
+    steps_per_traj = []
+    for i in range(n_traj):
+        world_pos = np.random.randn(T, N, 3).astype(np.float32)
+        mesh_pos  = np.random.randn(N, 2).astype(np.float32)
+        node_type = np.zeros((N, 1), dtype=np.int32)
+        cells     = np.random.randint(0, N, (F, 3)).astype(np.int32)
+        np.savez_compressed(
+            os.path.join(split_dir, f"traj_{i:05d}.npz"),
+            world_pos=world_pos,
+            mesh_pos=mesh_pos,
+            node_type=node_type,
+            cells=cells,
+        )
+        steps_per_traj.append(T)
+
+    np.savez_compressed(
+        os.path.join(data_dir, "train_index.npz"),
+        n_traj=np.array(n_traj, dtype=np.int64),
+        steps_per_traj=np.array(steps_per_traj, dtype=np.int32),
+    )
     return n_traj, T, N, F
 
 

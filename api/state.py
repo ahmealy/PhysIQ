@@ -125,7 +125,7 @@ DOMAINS = {
 
 def _probe_flag_available() -> bool:
     """Check if flag_simple data has been parsed and is ready."""
-    return os.path.exists("data_flag/train_pos.npz")
+    return os.path.exists("data_flag/train_index.npz")
 
 # Update flag_simple availability at import time
 DOMAINS["flag_simple"]["available"] = _probe_flag_available()

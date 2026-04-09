@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Server, CheckCircle2, XCircle, Loader2, Copy, Check, Activity, Skull } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export const Train: React.FC = () => {
+  const [searchParams] = useSearchParams();
   const [domains, setDomains] = useState<Record<string, any>>({});
   const [config, setConfig] = useState({
-    domain: 'cylinder_flow',
+    domain: searchParams.get('domain') || 'cylinder_flow',
     epochs: 100,
     batch_size: 20,
     lr: 0.0001,

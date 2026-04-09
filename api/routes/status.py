@@ -41,6 +41,8 @@ def _checkpoint_info_sync(path: str) -> Optional[dict]:
         "param_count":  param_count,
         "param_count_m": round(param_count / 1e6, 2),
         "path":         path,
+        "domain":       ckpt.get("domain", "cylinder_flow"),
+        "target_field": ckpt.get("target_field", "velocity"),
         "last_modified": datetime.fromtimestamp(
             mtime, tz=timezone.utc
         ).isoformat(),

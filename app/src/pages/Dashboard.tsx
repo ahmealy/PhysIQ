@@ -5,7 +5,7 @@ import { fetchWithRetry } from '../utils/fetch';
 
 export const Dashboard: React.FC = () => {
   const [status, setStatus] = useState<any>(null);
-  const [checkpoint, setCheckpoint] = useState<any>(null);
+  const [checkpoints, setCheckpoints] = useState<Record<string, any>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -17,15 +17,22 @@ export const Dashboard: React.FC = () => {
           const d = await r.json();
           setStatus(d);
           setLoadError(null);
+          // Fetch checkpoint for every known domain in parallel
+          const domainKeys = Object.keys(d.domains || {});
+          const results = await Promise.all(
+            domainKeys.map(async (key) => {
+              try {
+                const cr = await fetch(`/api/checkpoint?domain=${key}`);
+                return [key, cr.ok ? await cr.json() : null] as [string, any];
+              } catch {
+                return [key, null] as [string, any];
+              }
+            })
+          );
+          if (!cancelled) setCheckpoints(Object.fromEntries(results));
         }
       } catch {
         if (!cancelled) setLoadError('Backend not reachable. Retrying…');
-      }
-      try {
-        const r = await fetchWithRetry('/api/checkpoint', isInitial ? 4 : 1, 1500);
-        if (!cancelled) setCheckpoint(r.ok ? await r.json() : null);
-      } catch {
-        if (!cancelled) setCheckpoint(null);
       }
     };
     load(true);
@@ -64,28 +71,28 @@ export const Dashboard: React.FC = () => {
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard 
-          icon={Activity} 
-          label="Training Status" 
-          value={status.training_running ? "Running" : "Idle"} 
+        <StatCard
+          icon={Activity}
+          label="Training Status"
+          value={status.training_running ? "Running" : "Idle"}
           color={status.training_running ? "text-blue-400" : "text-slate-400"}
         />
         <StatCard
           icon={CheckCircle2}
-          label="Best Valid Loss"
-          value={status.checkpoint_valid_loss != null ? status.checkpoint_valid_loss.toFixed(5) : '—'}
+          label="Best Valid Loss (CFD)"
+          value={checkpoints['cylinder_flow']?.valid_loss != null ? checkpoints['cylinder_flow'].valid_loss.toFixed(5) : '—'}
           color="text-green-400"
         />
-        <StatCard 
-          icon={Database} 
-          label="Saved Rollouts" 
-          value={status.saved_rollouts} 
+        <StatCard
+          icon={Database}
+          label="Saved Rollouts"
+          value={status.saved_rollouts}
           color="text-purple-400"
         />
         <StatCard
           icon={HardDrive}
-          label="Model Size"
-          value={status.checkpoint_size_mb != null ? `${status.checkpoint_size_mb} MB` : '—'}
+          label="Models Saved"
+          value={Object.values(checkpoints).filter(Boolean).length + ' / ' + Object.keys(status.domains || {}).length}
           color="text-orange-400"
         />
       </div>
@@ -124,35 +131,75 @@ export const Dashboard: React.FC = () => {
         <div className="space-y-6">
           <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80">
-              <h3 className="font-semibold text-white">Model Checkpoint</h3>
+              <h3 className="font-semibold text-white">Model Checkpoints</h3>
+              <p className="text-xs text-slate-500 mt-0.5">One checkpoint per domain — resume from where you left off</p>
             </div>
-            <div className="p-6">
-              {checkpoint ? (
-                <div className="space-y-4">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Epoch</span>
-                    <span className="text-slate-200 font-mono">{checkpoint.epoch}</span>
+            <div className="p-4 space-y-3">
+              {Object.entries(status.domains).map(([key, domain]: [string, any]) => {
+                const ckpt = checkpoints[key];
+                return (
+                  <div key={key} className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${ckpt ? 'bg-green-500' : 'bg-slate-600'}`} />
+                        <span className="text-sm font-medium text-slate-200">{domain.label}</span>
+                      </div>
+                      {ckpt && (
+                        <span className="text-[10px] font-mono text-slate-500 bg-slate-900 px-2 py-0.5 rounded">
+                          {ckpt.size_mb} MB
+                        </span>
+                      )}
+                    </div>
+                    {ckpt ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div>
+                            <span className="text-slate-500">Epoch</span>
+                            <div className="text-slate-200 font-mono mt-0.5">{ckpt.epoch}</div>
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Valid Loss</span>
+                            <div className="text-green-400 font-mono mt-0.5">{ckpt.valid_loss.toExponential(3)}</div>
+                          </div>
+                          <div className="col-span-2">
+                            <span className="text-slate-500">Saved</span>
+                            <div className="text-slate-400 mt-0.5">{new Date(ckpt.last_modified).toLocaleString()}</div>
+                          </div>
+                          {ckpt.target_field && (
+                            <div className="col-span-2">
+                              <span className="text-slate-500">Target field</span>
+                              <div className="mt-0.5">
+                                <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${ckpt.target_field === 'pressure' ? 'bg-amber-900/40 text-amber-400' : 'bg-blue-900/40 text-blue-400'}`}>
+                                  {ckpt.target_field}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <Link
+                          to={`/train?domain=${key}`}
+                          className="block w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-center rounded-lg text-xs font-medium transition-colors"
+                        >
+                          Resume Training
+                        </Link>
+                      </>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-slate-500 text-xs">
+                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span>No checkpoint yet</span>
+                        </div>
+                        <Link
+                          to={`/train?domain=${key}`}
+                          className="block w-full py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-center rounded-lg text-xs font-medium transition-colors"
+                        >
+                          Start Training
+                        </Link>
+                      </div>
+                    )}
                   </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Validation Loss</span>
-                    <span className="text-green-400 font-mono">{checkpoint.valid_loss.toFixed(6)}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Last Modified</span>
-                    <span className="text-slate-400 text-xs">{new Date(checkpoint.last_modified).toLocaleString()}</span>
-                  </div>
-                  <div className="pt-4">
-                    <Link to="/train" className="block w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-center rounded-lg text-sm font-medium transition-colors">
-                      Resume Training
-                    </Link>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 text-slate-500 text-sm">
-                  <AlertCircle className="w-4 h-4" />
-                  <span>No checkpoint found</span>
-                </div>
-              )}
+                );
+              })}
             </div>
           </section>
         </div>

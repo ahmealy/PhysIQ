@@ -189,6 +189,20 @@ export const Train: React.FC = () => {
           setIsRunning(true);
           setStartTime(prev => prev ?? Date.now());
           startStreaming();
+          // Sync config dropdowns to the actually-running job
+          if (data.active_config) {
+            setConfig(prev => ({
+              ...prev,
+              domain:               data.active_config.domain              ?? prev.domain,
+              target_field:         data.active_config.target_field        ?? prev.target_field,
+              epochs:               data.active_config.num_epochs          ?? prev.epochs,
+              batch_size:           data.active_config.batch_size          ?? prev.batch_size,
+              lr:                   data.active_config.lr                  ?? prev.lr,
+              noise_std:            data.active_config.noise_std           ?? prev.noise_std,
+              early_stopping_patience: data.active_config.early_stopping_patience ?? prev.early_stopping_patience,
+              message_passing_steps: data.active_config.message_passing_num ?? prev.message_passing_steps,
+            }));
+          }
         } else {
           // Training is not running — make sure button shows correctly
           setIsRunning(false);

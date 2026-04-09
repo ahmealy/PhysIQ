@@ -458,6 +458,7 @@ def kill_process(pid: int):
 
 
 
+@router.get("/status")
 async def train_status():
     is_running = (
         (state.train_process is not None and state.train_process.poll() is None)
@@ -469,6 +470,16 @@ async def train_status():
         None, _parse_log, state.train_log_path
     )
     best = min(epochs, key=lambda e: e["valid_loss"]) if epochs else None
+
+    # Read active training config so the UI can sync domain/target/etc on reload
+    active_config = None
+    cfg_path = "runs/ui_train_config.json"
+    if is_running and os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                active_config = json.load(f)
+        except Exception:
+            pass
 
     return {
         "running":         is_running,
@@ -482,6 +493,7 @@ async def train_status():
         "log_start_ms":    int(os.path.getctime(state.train_log_path) * 1000)
                            if os.path.exists(state.train_log_path) else None,
         "log_path":        state.train_log_path,
+        "active_config":   active_config,
     }
 
 

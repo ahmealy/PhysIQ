@@ -568,6 +568,9 @@ async def train_stream():
                         })
                         break
 
+            # Keepalive ping so the browser EventSource doesn't time out
+            # during long epochs (each flag_simple epoch can take hours).
+            yield ": ping\n\n"
             await asyncio.sleep(5)
 
     return StreamingResponse(

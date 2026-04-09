@@ -52,12 +52,20 @@ export const Train: React.FC = () => {
     }).catch(() => {});
   };
 
-  // Tick elapsed timer while running
+  const startTimeRef = useRef<number | null>(null);
+
+  // Keep ref in sync with state so the timer closure always reads fresh value
+  useEffect(() => { startTimeRef.current = startTime; }, [startTime]);
+
+  // Tick elapsed timer while running — uses ref so interval never restarts on startTime change
   useEffect(() => {
-    if (!isRunning || startTime === null) return;
-    const t = setInterval(() => setElapsed(Math.floor((Date.now() - startTime) / 1000)), 1000);
+    if (!isRunning) return;
+    const t = setInterval(() => {
+      if (startTimeRef.current !== null)
+        setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
+    }, 1000);
     return () => clearInterval(t);
-  }, [isRunning, startTime]);
+  }, [isRunning]);
 
   // Poll raw log lines every 3s while training is running — shows tqdm progress
   useEffect(() => {
@@ -135,8 +143,8 @@ export const Train: React.FC = () => {
       }
     };
     es.onerror = () => {
-      setLogLines(prev => [...prev, '[stream disconnected]']);
-      setIsRunning(false);
+      // Don't mark training as stopped — the browser will auto-reconnect.
+      // Only done/error SSE events should change isRunning.
       es.close();
     };
   }, []);
@@ -157,7 +165,7 @@ export const Train: React.FC = () => {
         // Set isRunning from fast status endpoint before the full train/status loads
         if (d.training_running) {
           setIsRunning(true);
-          setStartTime(Date.now());
+          // Don't set startTime here — wait for log_start_ms from full status
           startStreaming();
           setStatusLoaded(true);  // already know enough — show Stop button immediately
         }

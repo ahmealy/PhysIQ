@@ -189,7 +189,7 @@ export const Train: React.FC = () => {
         if (data.log_path) setLogPath(data.log_path);
         // Track whether training is executing on the remote GPU
         if (data.running) setRemoteActive(!!data.remote);
-        // Restore accurate elapsed time from log file creation timestamp
+        // Restore accurate elapsed time from persisted launch timestamp
         if (data.log_start_ms && data.running) {
           setStartTime(data.log_start_ms);
         }
@@ -197,7 +197,8 @@ export const Train: React.FC = () => {
         // If fast path didn't fire yet, handle running state here.
         if (data.running) {
           setIsRunning(true);
-          setStartTime(prev => prev ?? Date.now());
+          // Don't overwrite log_start_ms — only fall back if we have nothing yet
+          if (!data.log_start_ms) setStartTime(prev => prev ?? Date.now());
           startStreaming();
           // Sync config dropdowns to the actually-running job
           if (data.active_config) {

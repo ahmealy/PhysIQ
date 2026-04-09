@@ -21,6 +21,9 @@ train_log_path: str = os.path.join(_project_root, "runs", "train_ui.log")
 _train_pid_file: str = os.path.join(_project_root, "runs", "train_ui.pid")
 # Remote PID file written by the nohup & launch on the GPU host (shared NFS).
 _train_remote_pid_file: str = os.path.join(_project_root, "runs", "train_remote.pid")
+# Launch-time file — stores Unix timestamp (ms) of when training was started.
+# Persisted to disk so elapsed time survives server restarts.
+_train_start_time_file: str = os.path.join(_project_root, "runs", "train_start_time.txt")
 
 
 def save_train_pid(pid: int) -> None:
@@ -29,8 +32,24 @@ def save_train_pid(pid: int) -> None:
         f.write(str(pid))
 
 
+def save_train_start_time(ms: int | None = None) -> None:
+    """Persist the training start timestamp (ms since epoch) to disk."""
+    os.makedirs(os.path.join(_project_root, "runs"), exist_ok=True)
+    ts = ms if ms is not None else int(time.time() * 1000)
+    with open(_train_start_time_file, "w") as f:
+        f.write(str(ts))
+
+
+def get_train_start_time() -> int | None:
+    """Return the persisted training start timestamp in ms, or None."""
+    try:
+        return int(open(_train_start_time_file).read().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def clear_train_pid() -> None:
-    for path in (_train_pid_file, _train_remote_pid_file):
+    for path in (_train_pid_file, _train_remote_pid_file, _train_start_time_file):
         try:
             os.remove(path)
         except FileNotFoundError:

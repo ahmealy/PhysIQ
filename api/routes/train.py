@@ -342,6 +342,7 @@ def train_start(config: TrainConfig):
         # Store remote PID in the shared PID file so orphan detection works
         pid_to_save = remote_pid or 0
         state.save_train_pid(pid_to_save)
+        state.save_train_start_time()   # record launch timestamp for elapsed timer
         state.train_process = None   # SSH proc already exited
         state.clear_model_cache()
         return {"pid": remote_pid, "status": "started", "execution": execution}
@@ -355,6 +356,7 @@ def train_start(config: TrainConfig):
         log_file.close()
         state.train_process = proc
         state.save_train_pid(proc.pid)
+        state.save_train_start_time()   # record launch timestamp for elapsed timer
         state.clear_model_cache()
         return {"pid": proc.pid, "status": "started", "execution": execution}
 
@@ -552,17 +554,24 @@ async def train_status():
         except Exception:
             pass
 
+    remote_cfg = _load_remote_cfg()
+    device_label = "LOCAL CPU"
+    if remote_cfg:
+        host = remote_cfg.get("host", "remote")
+        device_label = f"REMOTE GPU ({host})"
     return {
         "running":         is_running,
         "pid":             state.train_process.pid if is_running and state.train_process else None,
         "epochs":          epochs,
         "best_epoch":      best["epoch"]      if best else None,
         "best_valid_loss": best["valid_loss"] if best else None,
-        "remote":          _load_remote_cfg() is not None,
-        # Log file creation time (ms since epoch) so the frontend can show accurate elapsed time
-        # even after a page reload. None if no log exists yet.
-        "log_start_ms":    int(os.path.getctime(state.train_log_path) * 1000)
-                           if os.path.exists(state.train_log_path) else None,
+        "remote":          remote_cfg is not None,
+        "device":          device_label,
+        # Accurate training start time (ms since epoch) so the frontend shows correct elapsed.
+        # Prefer the persisted start-time file written at launch; fall back to log ctime.
+        "log_start_ms":    state.get_train_start_time()
+                           or (int(os.path.getctime(state.train_log_path) * 1000)
+                               if os.path.exists(state.train_log_path) else None),
         "log_path":        state.train_log_path,
         "active_config":   active_config,
     }

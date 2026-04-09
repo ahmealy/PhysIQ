@@ -158,8 +158,15 @@ def test_remote(cfg: RemoteConfig):
     venv_py = cfg.venv_python.strip()
 
     try:
+        # Run python --version and torch GPU check with explicit markers
+        # immune to login-shell noise (e.g. /etc/profile printing warnings).
+        remote_cmd = (
+            f"echo __PYTHON__; {shlex.quote(venv_py)} --version 2>&1; "
+            f"echo __GPU__; {shlex.quote(venv_py)} -c "
+            f"\"import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-gpu')\" 2>/dev/null || echo no-gpu"
+        )
         result = subprocess.run(
-            ssh_prefix + [f"{venv_py} --version && nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'no-gpu'"],
+            ssh_prefix + [remote_cmd],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:
@@ -170,18 +177,30 @@ def test_remote(cfg: RemoteConfig):
                 return {"ok": False, "message": f"Cannot reach {cfg.host}:{cfg.port} — is the machine on and port correct?"}
             return {"ok": False, "message": stderr or "SSH command failed (exit %d)" % result.returncode}
 
-        output = result.stdout.strip()
-        gpu_line = ""
-        for line in output.splitlines():
-            if "Python" not in line and line.strip() and line != "no-gpu":
-                gpu_line = line.strip()
+        # Parse sections delimited by markers — immune to login-shell noise before __PYTHON__
+        output = result.stdout
+        python_ver, gpu_line = "unknown", ""
+        section = None
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if line == "__PYTHON__":
+                section = "python"
+                continue
+            if line == "__GPU__":
+                section = "gpu"
+                continue
+            if section == "python" and line:
+                python_ver = line
+                section = None  # only take first non-empty line
+            elif section == "gpu" and line and line != "no-gpu":
+                gpu_line = line
                 break
-        python_ver = next((l for l in output.splitlines() if "Python" in l), "unknown")
+
         msg = f"Connected ✓  {python_ver}"
         if gpu_line:
             msg += f"  |  GPU: {gpu_line}"
         else:
-            msg += "  |  No GPU detected"
+            msg += "  |  No GPU / CUDA not available"
         return {"ok": True, "message": msg}
 
     except subprocess.TimeoutExpired:
@@ -247,7 +266,7 @@ def train_start(config: TrainConfig):
     remote_cfg = _load_remote_cfg()
     if remote_cfg:
         # ── Remote GPU execution over SSH ─────────────────────────────────────
-        venv_py   = remote_cfg.get("venv_python", "~/ML/meshGraphNets_pytorch/venv/bin/python").strip()
+        venv_py   = remote_cfg.get("venv_python", "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python").strip()
         cfg_abs   = os.path.join(project_root, cfg_path)
         ssh_prefix = _build_ssh_prefix(remote_cfg)
         # Run train.py on the remote; shared filesystem means both sides see the same files
@@ -315,7 +334,32 @@ async def train_status():
         "best_epoch":      best["epoch"]      if best else None,
         "best_valid_loss": best["valid_loss"] if best else None,
         "remote":          _load_remote_cfg() is not None,
+        # Log file creation time (ms since epoch) so the frontend can show accurate elapsed time
+        # even after a page reload. None if no log exists yet.
+        "log_start_ms":    int(os.path.getctime(state.train_log_path) * 1000)
+                           if os.path.exists(state.train_log_path) else None,
+        "log_path":        state.train_log_path,
     }
+
+
+@router.get("/log")
+async def train_log(tail: int = 80):
+    """Return the last `tail` lines of the training log as plain text."""
+    if not os.path.exists(state.train_log_path):
+        return {"lines": []}
+    loop = asyncio.get_running_loop()
+    def _read():
+        with open(state.train_log_path, "r", errors="replace") as f:
+            lines = f.readlines()
+        # Strip tqdm carriage-return overwrite sequences — keep last \r-separated chunk per line
+        cleaned = []
+        for raw in lines[-tail:]:
+            # tqdm uses \r to overwrite the line; keep only the last segment
+            parts = raw.split('\r')
+            cleaned.append(parts[-1].rstrip('\n'))
+        return cleaned
+    lines = await loop.run_in_executor(None, _read)
+    return {"lines": lines}
 
 
 @router.get("/stream")

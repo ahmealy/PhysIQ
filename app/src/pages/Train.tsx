@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Server, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Server, CheckCircle2, XCircle, Loader2, Copy, Check } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export const Train: React.FC = () => {
@@ -22,6 +22,8 @@ export const Train: React.FC = () => {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [logLines, setLogLines] = useState<string[]>([]);
+  const [logPath, setLogPath] = useState<string>('runs/train_ui.log');
+  const [copied, setCopied] = useState(false);
   const [arch, setArch] = useState('GNS');
   const eventSourceRef = useRef<EventSource | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
@@ -32,12 +34,43 @@ export const Train: React.FC = () => {
   const [testStatus, setTestStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [testing, setTesting] = useState(false);
 
+  // Toggle remote GPU and immediately persist the change
+  const handleToggleRemote = async () => {
+    const next = !remoteEnabled;
+    setRemoteEnabled(next);
+    setTestStatus(null);
+    const cfg = { ...remote, enabled: next };
+    await fetch('/api/train/remote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    }).catch(() => {});
+  };
+
   // Tick elapsed timer while running
   useEffect(() => {
     if (!isRunning || startTime === null) return;
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - startTime) / 1000)), 1000);
     return () => clearInterval(t);
   }, [isRunning, startTime]);
+
+  // Poll raw log lines every 3s while training is running — shows tqdm progress
+  useEffect(() => {
+    if (!isRunning) return;
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/train/log?tail=60');
+        if (!r.ok) return;
+        const d = await r.json();
+        if (d.lines && d.lines.length > 0) {
+          setLogLines(d.lines.filter((l: string) => l.trim()));
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => clearInterval(t);
+  }, [isRunning]);
 
   // Auto-scroll log
   useEffect(() => {
@@ -113,6 +146,11 @@ export const Train: React.FC = () => {
         if (cancelled) return;
         setEpochs(data.epochs || []);
         if (data.best_epoch) setBestEpoch({ epoch: data.best_epoch, valid_loss: data.best_valid_loss });
+        if (data.log_path) setLogPath(data.log_path);
+        // Restore accurate elapsed time from log file creation timestamp
+        if (data.log_start_ms && data.running) {
+          setStartTime(data.log_start_ms);
+        }
         // If fast path already set isRunning, don't overwrite — just update epochs.
         // If fast path didn't fire yet, handle running state here.
         if (data.running) {
@@ -165,6 +203,14 @@ export const Train: React.FC = () => {
       body: JSON.stringify(cfg),
     });
     setTestStatus(null);
+  };
+
+  const handleCopyLog = async () => {
+    try {
+      await navigator.clipboard.writeText(logLines.join('\n'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* ignore */ }
   };
 
   const handleTestRemote = async () => {
@@ -348,10 +394,10 @@ export const Train: React.FC = () => {
                 <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Remote GPU</h3>
               </div>
               <button
-                onClick={() => { setRemoteEnabled(e => !e); setTestStatus(null); }}
-                className={`relative w-9 h-5 rounded-full transition-colors ${remoteEnabled ? 'bg-blue-600' : 'bg-slate-700'}`}
+                onClick={handleToggleRemote}
+                className={`relative w-10 h-5 rounded-full transition-colors ${remoteEnabled ? 'bg-blue-600' : 'bg-slate-700'}`}
               >
-                <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${remoteEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${remoteEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
               </button>
             </div>
             <div className="p-4 space-y-3">
@@ -505,14 +551,23 @@ export const Train: React.FC = () => {
               <div className="px-4 py-2.5 border-b border-slate-800 flex items-center gap-2">
                 <Terminal className="w-3.5 h-3.5 text-slate-500" />
                 <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Training Log</span>
-                {isRunning && <span className="ml-auto w-2 h-2 bg-green-500 rounded-full animate-pulse" />}
+                <span className="text-[10px] font-mono text-slate-700 ml-1 truncate max-w-[200px]">{logPath}</span>
+                <button
+                  onClick={handleCopyLog}
+                  className="ml-1 p-1 hover:bg-slate-800 rounded text-slate-600 hover:text-slate-400 transition-colors"
+                  title="Copy log to clipboard"
+                >
+                  {copied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+                </button>
+                {isRunning && <span className="ml-auto text-[10px] text-slate-600 italic">live · updates every 3s</span>}
+                {isRunning && <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />}
               </div>
               <div
                 ref={logRef}
-                className="p-4 h-40 overflow-y-auto font-mono text-[11px] text-slate-400 space-y-0.5"
+                className="p-4 h-56 overflow-y-auto font-mono text-[11px] text-slate-400 space-y-0.5"
               >
                 {logLines.map((line, i) => (
-                  <div key={i} className={line.startsWith('  ✓') ? 'text-green-400' : line.startsWith('---') ? 'text-blue-400' : ''}>
+                  <div key={i} className={`whitespace-pre-wrap break-all ${line.startsWith('  ✓') || line.includes('New best') ? 'text-green-400' : line.startsWith('---') || line.startsWith('Epoch') ? 'text-blue-400' : line.includes('Error') || line.includes('❌') ? 'text-red-400' : ''}`}>
                     {line}
                   </div>
                 ))}

@@ -257,7 +257,7 @@ export const Train: React.FC = () => {
 
   const handleCopyLog = async () => {
     try {
-      await navigator.clipboard.writeText(logLines.join('\n'));
+      await navigator.clipboard.writeText(logPath);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch { /* ignore */ }

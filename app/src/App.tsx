@@ -8,6 +8,7 @@ import { Visualize } from './pages/Visualize';
 import { DatasetStudio } from './pages/DatasetStudio';
 import { PipelineView } from './pages/PipelineView';
 import { ExperimentTracking } from './pages/ExperimentTracking';
+import { Generate } from './pages/Generate';
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
             <Route path="/train" element={<Train />} />
             <Route path="/predict" element={<Predict />} />
             <Route path="/visualize" element={<Visualize />} />
+            <Route path="/generate" element={<Generate />} />
             <Route path="/dataset" element={<DatasetStudio />} />
             <Route path="/pipeline" element={<PipelineView />} />
             <Route path="/experiments" element={<ExperimentTracking />} />

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import status, train, dataset, rollout, results, physics
+from api.routes import status, train, dataset, rollout, results, physics, generate
 
 app = FastAPI(
     title="MeshGraphNets Physics AI",
@@ -34,12 +34,13 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(status.router,  prefix="/api", tags=["System"])
-app.include_router(train.router,   prefix="/api", tags=["Training"])
-app.include_router(dataset.router, prefix="/api", tags=["Dataset"])
-app.include_router(rollout.router, prefix="/api", tags=["Inference"])
-app.include_router(results.router, prefix="/api", tags=["Results"])
-app.include_router(physics.router, prefix="/api", tags=["Physics"])
+app.include_router(status.router,   prefix="/api", tags=["System"])
+app.include_router(train.router,    prefix="/api", tags=["Training"])
+app.include_router(dataset.router,  prefix="/api", tags=["Dataset"])
+app.include_router(rollout.router,  prefix="/api", tags=["Inference"])
+app.include_router(results.router,  prefix="/api", tags=["Results"])
+app.include_router(physics.router,  prefix="/api", tags=["Physics"])
+app.include_router(generate.router, prefix="/api", tags=["Generate"])
 
 
 @app.get("/api", tags=["System"])

@@ -176,6 +176,7 @@ def get_result(filename: str):
     confidence_label = _confidence_label(confidence_score)
     domain = meta.get("domain", "cylinder_flow")
     target_field = meta.get("target_field", "velocity")
+    is_generate = bool(meta.get("is_generate", False))
 
     # Compute a quick single scalar RMSE for the header badge (cheap: only step 0)
     rmse_step0 = float(np.sqrt(np.mean(np.square(predicted[0] - targets[0]))))
@@ -193,6 +194,7 @@ def get_result(filename: str):
         "confidence_label": confidence_label,
         "domain":           domain,
         "target_field":     target_field,
+        "is_generate":      is_generate,
         "rmse_step0":       rmse_step0,
     }
 

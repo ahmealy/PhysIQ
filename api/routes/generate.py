@@ -905,6 +905,7 @@ async def generate_rollout(session_id: str, candidate_id: int,
                         "domain":           "flag_simple",
                         "target_field":     "world_pos",
                         "confidence_score": None,
+                        "is_generate":      True,   # no ground truth — prediction only
                     }],
                     f,
                 )
@@ -969,6 +970,7 @@ async def generate_rollout(session_id: str, candidate_id: int,
                         "domain":           "cylinder_flow",
                         "target_field":     "velocity",
                         "confidence_score": None,
+                        "is_generate":      True,   # no ground truth — prediction only
                     }],
                     f,
                 )

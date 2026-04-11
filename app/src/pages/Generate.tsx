@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sparkles, Square, AlertCircle, Info } from 'lucide-react';
 import { CandidateCard } from '../components/CandidateCard';
 import { OptimizationChart } from '../components/OptimizationChart';
@@ -34,6 +34,24 @@ interface GenerateConfig {
   mode:         'quick' | 'deep';
 }
 
+// ── Persistence helpers ───────────────────────────────────────────────────────
+
+const LS_CONFIG     = 'generate_config';
+const LS_CANDIDATES = 'generate_candidates';
+const LS_BEST_ID    = 'generate_best_id';
+const LS_TRAJECTORY = 'generate_trajectory';
+
+function loadLS<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch { return fallback; }
+}
+
+function saveLS(key: string, value: unknown) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+}
+
 // ── Domain metadata ──────────────────────────────────────────────────────────
 
 const DOMAIN_CONFIGS = {
@@ -60,25 +78,42 @@ const DOMAIN_CONFIGS = {
 // ── Main component ───────────────────────────────────────────────────────────
 
 export const Generate: React.FC = () => {
-  const [config, setConfig]             = useState<GenerateConfig>({
-    domain:       'cylinder_flow',
-    target_value: 0.025,
-    n_candidates: 6,
-    method:       'sample',
-    device:       'cpu',
-    mode:         'quick',
-  });
+  const [config, setConfig]             = useState<GenerateConfig>(() =>
+    loadLS(LS_CONFIG, {
+      domain:       'cylinder_flow',
+      target_value: 0.025,
+      n_candidates: 6,
+      method:       'sample',
+      device:       'cpu',
+      mode:         'quick' as const,
+    })
+  );
   const [isGenerating, setIsGenerating] = useState(false);
-  const [candidates, setCandidates]     = useState<Candidate[]>([]);
+  const [candidates, setCandidates]     = useState<Candidate[]>(() =>
+    loadLS<Candidate[]>(LS_CANDIDATES, [])
+  );
   const [selectedId, setSelectedId]     = useState<number | null>(null);
   const [error, setError]               = useState<string | null>(null);
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
-  const [bestId, setBestId]             = useState<number | null>(null);
-  const [optTrajectory, setOptTrajectory] = useState<number[]>([]);
+  const [bestId, setBestId]             = useState<number | null>(() =>
+    loadLS<number | null>(LS_BEST_ID, null)
+  );
+  const [optTrajectory, setOptTrajectory] = useState<number[]>(() =>
+    loadLS<number[]>(LS_TRAJECTORY, [])
+  );
+  // Deep mode: track how many GNN rollouts have completed out of total
+  const [gnnProgress, setGnnProgress]   = useState<{done: number; total: number} | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
 
   const domCfg = DOMAIN_CONFIGS[config.domain as keyof typeof DOMAIN_CONFIGS];
+
+  // ── Persist state to localStorage ─────────────────────────────────────────
+
+  useEffect(() => { saveLS(LS_CONFIG,     config);       }, [config]);
+  useEffect(() => { saveLS(LS_CANDIDATES, candidates);   }, [candidates]);
+  useEffect(() => { saveLS(LS_BEST_ID,    bestId);       }, [bestId]);
+  useEffect(() => { saveLS(LS_TRAJECTORY, optTrajectory);}, [optTrajectory]);
 
   // ── Start generation ───────────────────────────────────────────────────────
 
@@ -90,6 +125,7 @@ export const Generate: React.FC = () => {
     setError(null);
     setWarningMessage(null);
     setOptTrajectory([]);
+    setGnnProgress(null);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -128,10 +164,21 @@ export const Generate: React.FC = () => {
             const payload = JSON.parse(dataLine);
             if (eventLine === 'candidate') {
               setCandidates(prev => [...prev, payload as Candidate]);
+            } else if (eventLine === 'gnn_score') {
+              // Merge GNN score into the already-rendered candidate card
+              const { id, gnn_predicted_value, score_gap, gnn_converged,
+                      gnn_failed, candidate_index, total_candidates } = payload;
+              setCandidates(prev => prev.map(c =>
+                c.id === id
+                  ? { ...c, gnn_predicted_value, score_gap, gnn_converged, gnn_failed }
+                  : c
+              ));
+              setGnnProgress({ done: (candidate_index ?? 0) + 1, total: total_candidates ?? 1 });
             } else if (eventLine === 'trajectory') {
               setOptTrajectory(payload.values ?? []);
             } else if (eventLine === 'done') {
               setBestId(payload.best_id ?? null);
+              setGnnProgress(null);
             } else if (eventLine === 'error') {
               setError(payload.detail ?? 'Unknown error');
             } else if (eventLine === 'warning') {
@@ -146,6 +193,7 @@ export const Generate: React.FC = () => {
       }
     } finally {
       setIsGenerating(false);
+      setGnnProgress(null);
       abortRef.current = null;
     }
   }, [config]);
@@ -320,7 +368,10 @@ export const Generate: React.FC = () => {
           {isGenerating && (
             <div className="flex items-center gap-2 text-sm text-violet-400">
               <div className="w-2 h-2 bg-violet-400 rounded-full animate-pulse" />
-              Generating {candidates.length} / {config.n_candidates} candidates…
+              {gnnProgress
+                ? <>🔬 GNN scoring {gnnProgress.done} / {gnnProgress.total} candidates…</>
+                : <>Generating {candidates.length} / {config.n_candidates} candidates…</>
+              }
             </div>
           )}
         </div>

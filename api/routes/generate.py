@@ -558,8 +558,12 @@ class ThumbnailRenderer:
         ax.set_facecolor("#0f172a")
         fig.patch.set_facecolor("#0f172a")
 
-        # Filled triangle heatmap — matches the Visualize page style
-        ax.tripcolor(triang, vel_mag, cmap="turbo", shading="gouraud")
+        # Flat-shaded heatmap — matches the Visualize/Analyze page (per-triangle average,
+        # auto-normalised to the velocity range of this frame).
+        vmin = float(vel_mag.min())
+        vmax = float(vel_mag.max()) or 1.0   # guard against all-zero initial condition
+        ax.tripcolor(triang, vel_mag, cmap="turbo", shading="flat",
+                     vmin=vmin, vmax=vmax)
 
         ax.set_aspect("equal")
         ax.axis("off")
@@ -634,15 +638,21 @@ async def generate(req: GenerateRequest):
         try:
             sampler = _DOMAIN_SAMPLERS[req.domain]()
 
-            # Run sampler in thread pool so it doesn't block the event loop
+            # ── Phase 1: quick sample (CVAE + surrogate) ──────────────────────
+            # Run in thread pool to avoid blocking the event loop.
             loop = asyncio.get_running_loop()
             results, trajectory = await loop.run_in_executor(
                 None,
-                lambda: sampler.sample(req.target_value,
-                                       req.n_candidates,
-                                       req.device,
-                                       req.method,
-                                       req.mode)
+                lambda: sampler._quick_sample(req.target_value,
+                                              req.n_candidates,
+                                              req.device,
+                                              req.method)
+                if hasattr(sampler, "_quick_sample")
+                else sampler.sample(req.target_value,
+                                    req.n_candidates,
+                                    req.device,
+                                    req.method,
+                                    "quick")
             )
 
             # Stream optimisation trajectory first (gradient mode only)
@@ -650,14 +660,7 @@ async def generate(req: GenerateRequest):
                 yield _sse_event("trajectory", {"values": trajectory})
                 await asyncio.sleep(0)
 
-            # Warn if deep mode was requested but fell back to quick (e.g. missing checkpoint)
-            if req.mode == "deep" and all(c.gnn_predicted_value is None for c, _ in results):
-                yield _sse_event("warning", {
-                    "detail": "GNN checkpoint not found — results are surrogate-only (quick mode)."
-                })
-                await asyncio.sleep(0)
-
-            # Store thumbnails and yield candidate events
+            # ── Phase 2: render thumbnails + stream quick candidates ───────────
             session_thumbs: dict[int, bytes] = {}
             thumbnail_urls: dict[int, str | None] = {}
             best_id  = 0
@@ -683,8 +686,8 @@ async def generate(req: GenerateRequest):
                     best_err = err
                     best_id  = c.id
 
-            # Cache all thumbnails before streaming any candidate events so every
-            # thumbnail URL is live by the time the browser receives it.
+            # Cache all thumbnails before streaming so every URL is live when
+            # the browser receives the first candidate event.
             _cache_session(session_id, session_thumbs)
 
             for c, _ in results:
@@ -693,6 +696,56 @@ async def generate(req: GenerateRequest):
                 payload["session_id"]    = session_id
                 yield _sse_event("candidate", payload)
                 await asyncio.sleep(0)
+
+            # ── Phase 3 (deep mode): GNN score each candidate one at a time ───
+            # Stream a `gnn_score` event after each rollout so the UI updates
+            # progressively instead of waiting for all candidates to finish.
+            if req.mode == "deep" and req.domain == "cylinder_flow":
+                from api.state import get_gnn_scorer, DOMAINS
+                import math
+
+                cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
+                if not os.path.exists(cfd_ckpt):
+                    yield _sse_event("warning", {
+                        "detail": "GNN checkpoint not found — results are surrogate-only."
+                    })
+                else:
+                    scorer = get_gnn_scorer(cfd_ckpt, device=req.device)
+                    scorer.simulator.eval()
+
+                    for idx, (c, graph) in enumerate(results):
+                        # Score one candidate in a thread so the event loop stays live
+                        try:
+                            gnn_score = await loop.run_in_executor(
+                                None,
+                                lambda g=graph: scorer._adaptive_rollout(g, req.device)
+                            )
+                            if math.isnan(gnn_score.gnn_predicted_value):
+                                raise ValueError("NaN drag")
+                            gnn_val  = gnn_score.gnn_predicted_value
+                            gap      = abs(c.predicted_value - gnn_val)
+                            converged = gnn_score.converged
+                            failed   = False
+                        except Exception as exc:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "GNN rollout failed for candidate %d: %s", idx, exc)
+                            gnn_val  = None
+                            gap      = None
+                            converged = None
+                            failed   = True
+
+                        yield _sse_event("gnn_score", {
+                            "id":                  c.id,
+                            "gnn_predicted_value": gnn_val,
+                            "score_gap":           gap,
+                            "gnn_converged":       converged,
+                            "gnn_failed":          failed,
+                            "candidate_index":     idx,
+                            "total_candidates":    len(results),
+                        })
+                        await asyncio.sleep(0)
+
             yield _sse_event("done", {"best_id": best_id, "session_id": session_id})
 
         except HTTPException as e:

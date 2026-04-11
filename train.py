@@ -79,6 +79,12 @@ checkpoint_dir          = cfg['checkpoint_dir']
 log_dir                 = cfg['log_dir']
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+# Print device info prominently so the training log shows GPU vs CPU immediately
+if torch.cuda.is_available():
+    print(f"[DEVICE] GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_memory // 1024**2} MB)")
+else:
+    print("[DEVICE] CPU (no CUDA available)")
+print(f"[DEVICE] torch {torch.__version__}, device={device}, domain={domain}")
 os.makedirs(checkpoint_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 

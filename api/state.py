@@ -15,16 +15,27 @@ from extensions.generative.gnn_scorer import GnnScorer
 train_process: Optional[subprocess.Popen] = None
 # Use absolute path so the log path shown in the UI is copy-pasteable
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-train_log_path: str = os.path.join(_project_root, "runs", "train_ui.log")
 
-# PID file — written when training starts, deleted when it ends.
-# Survives uvicorn restarts so we can detect orphaned processes.
-_train_pid_file: str = os.path.join(_project_root, "runs", "train_ui.pid")
-# Remote PID file written by the nohup & launch on the GPU host (shared NFS).
-_train_remote_pid_file: str = os.path.join(_project_root, "runs", "train_remote.pid")
-# Launch-time file — stores Unix timestamp (ms) of when training was started.
-# Persisted to disk so elapsed time survives server restarts.
-_train_start_time_file: str = os.path.join(_project_root, "runs", "train_start_time.txt")
+# Active domain — set at train_start, read everywhere else.
+# Domain-scoped filenames prevent collisions when switching domains.
+_active_domain: str = "cylinder_flow"
+
+def _runs_path(filename: str) -> str:
+    return os.path.join(_project_root, "runs", filename)
+
+def set_active_domain(domain: str) -> None:
+    global _active_domain, train_log_path, _train_pid_file, _train_remote_pid_file, \
+           _train_start_time_file, _train_heartbeat_file
+    _active_domain = domain
+    slug = domain.replace("_", "")          # cylinder_flow → cylinderflow, flag_simple → flagsimple
+    train_log_path          = _runs_path(f"train_{slug}.log")
+    _train_pid_file         = _runs_path(f"train_{slug}.pid")
+    _train_remote_pid_file  = _runs_path(f"train_{slug}_remote.pid")
+    _train_start_time_file  = _runs_path(f"train_{slug}_start.txt")
+    _train_heartbeat_file   = _runs_path(f"train_{slug}_heartbeat")
+
+# Initialise with default domain
+set_active_domain(_active_domain)
 
 
 def save_train_pid(pid: int) -> None:
@@ -50,8 +61,8 @@ def get_train_start_time() -> int | None:
 
 
 def clear_train_pid() -> None:
-    _heartbeat = os.path.join(_project_root, "runs", "train_heartbeat")
-    for path in (_train_pid_file, _train_remote_pid_file, _train_start_time_file, _heartbeat):
+    for path in (_train_pid_file, _train_remote_pid_file,
+                 _train_start_time_file, _train_heartbeat_file):
         try:
             os.remove(path)
         except FileNotFoundError:
@@ -81,10 +92,9 @@ def get_orphan_pid() -> Optional[int]:
                     if os.path.exists(train_log_path) else 9999
                 )
                 # Also check heartbeat file (touched every 60s by the remote launcher)
-                _heartbeat = os.path.join(_project_root, "runs", "train_heartbeat")
                 heartbeat_age = (
-                    time.time() - os.path.getmtime(_heartbeat)
-                    if os.path.exists(_heartbeat) else 9999
+                    time.time() - os.path.getmtime(_train_heartbeat_file)
+                    if os.path.exists(_train_heartbeat_file) else 9999
                 )
                 alive = log_age < 3600 or heartbeat_age < 180
                 if alive:

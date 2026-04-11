@@ -253,6 +253,9 @@ def train_start(config: TrainConfig):
     if not domain_cfg["available"]:
         raise HTTPException(400, "Domain '%s' is not available yet" % config.domain)
 
+    # Switch all domain-scoped file paths (log, pid, heartbeat) to the new domain
+    state.set_active_domain(config.domain)
+
     # Write config JSON for train.py to consume
     os.makedirs("runs", exist_ok=True)
     cfg_path = "runs/ui_train_config.json"
@@ -304,12 +307,13 @@ def train_start(config: TrainConfig):
         cfg_abs    = os.path.join(project_root, cfg_path)
         ssh_prefix = _build_ssh_prefix(remote_cfg)
         log_abs    = state.train_log_path
-        remote_pid_file = os.path.join(project_root, "runs", "train_remote.pid")
+        # Use domain-scoped paths from state so log/pid/heartbeat never collide
+        remote_pid_file = state._train_remote_pid_file
+        heartbeat_path  = state._train_heartbeat_file
 
         # Write a bash launcher script on shared NFS — avoids all csh quoting issues.
         # nohup detaches train.py from the SSH session so it survives server restarts.
         launcher_path = os.path.join(project_root, "runs", "train_launcher.sh")
-        heartbeat_path = os.path.join(project_root, "runs", "train_heartbeat")
         with open(launcher_path, "w") as lf:
             lf.write("#!/bin/bash\n")
             lf.write(f"cd {shlex.quote(project_root)}\n")
@@ -599,6 +603,16 @@ def kill_process(pid: int):
 
 @router.get("/status")
 async def train_status():
+    # Restore domain-scoped paths from the active config file if server restarted
+    cfg_path = "runs/ui_train_config.json"
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                saved_domain = json.load(f).get("domain", "cylinder_flow")
+            state.set_active_domain(saved_domain)
+        except Exception:
+            pass
+
     is_running = (
         (state.train_process is not None and state.train_process.poll() is None)
         or state.get_orphan_pid() is not None

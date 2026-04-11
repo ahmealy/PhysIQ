@@ -35,3 +35,6 @@ meta.json
 *.claude*
 *.tfrecord
 confidence/build/*
+
+# Git worktrees
+.worktrees/

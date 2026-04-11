@@ -50,7 +50,7 @@ def dataset_info(domain: str = "cylinder_flow", split: str = "test"):
 
 
 def _compute_samples(npz_path: str, dat_path: str) -> dict:
-    """CPU/IO-heavy computation — always called via run_in_executor."""
+    """CPU/IO-heavy computation for CFD domain — always called via run_in_executor."""
     meta = np.load(npz_path, allow_pickle=True)
     indices = meta["indices"]
     n_trajectories = len(indices) - 1
@@ -111,6 +111,89 @@ def _compute_samples(npz_path: str, dat_path: str) -> dict:
     }
 
 
+def _compute_samples_flag(data_dir: str, split: str) -> dict:
+    """CPU-heavy computation for flag_simple (cloth) domain.
+    Cloth data is stored per-trajectory as individual .npz files under {data_dir}/{split}/.
+    Index file: {data_dir}/{split}_index.npz — contains n_traj, steps_per_traj.
+    """
+    index_path = os.path.join(data_dir, f"{split}_index.npz")
+    split_dir  = os.path.join(data_dir, split)
+    idx = np.load(index_path)
+    n_traj = int(idx["n_traj"])
+    steps_per_traj = idx["steps_per_traj"].tolist()
+
+    # Sample up to 20 trajectories for stats
+    sample_size = min(20, n_traj)
+    sampled = np.linspace(0, n_traj - 1, sample_size, dtype=int)
+
+    pos_mags = []
+    node_counts = []
+
+    for ti in range(n_traj):
+        traj_path = os.path.join(split_dir, f"traj_{ti:05d}.npz")
+        if not os.path.exists(traj_path):
+            node_counts.append(0)
+            continue
+        try:
+            traj = np.load(traj_path)
+            world_pos = traj["world_pos"]   # [T, N, 3]
+            N = world_pos.shape[1]
+            node_counts.append(N)
+            if ti in sampled:
+                pos_t0 = world_pos[0]       # [N, 3]
+                mag = np.linalg.norm(pos_t0, axis=-1)  # [N]
+                pos_mags.append(mag)
+        except Exception:
+            node_counts.append(0)
+
+    node_counts_arr = np.array(node_counts, dtype=np.int32)
+    if pos_mags:
+        sample_nodes = np.concatenate(pos_mags)
+    else:
+        sample_nodes = np.zeros(1)
+
+    traj_means = np.array([
+        float(np.linalg.norm(np.load(os.path.join(split_dir, f"traj_{i:05d}.npz"))["world_pos"][0], axis=-1).mean())
+        if os.path.exists(os.path.join(split_dir, f"traj_{i:05d}.npz")) else 0.0
+        for i in range(n_traj)
+    ])
+    energy_vals = 0.5 * sample_nodes ** 2
+
+    v_counts, v_edges = np.histogram(sample_nodes, bins=50)
+    velocity_bins = [{"bin": round(float(v_edges[i]), 6), "count": int(v_counts[i])} for i in range(len(v_counts))]
+
+    e_counts, e_edges = np.histogram(energy_vals, bins=50)
+    energy_bins = [{"bin": round(float(e_edges[i]), 6), "count": int(e_counts[i])} for i in range(len(e_counts))]
+
+    nc_unique = len(set(node_counts_arr.tolist()))
+    nc_counts, nc_edges = np.histogram(node_counts_arr, bins=min(30, max(1, nc_unique)))
+    node_count_bins = [{"bin": int(nc_edges[i]), "count": int(nc_counts[i])} for i in range(len(nc_counts))]
+
+    mean_v = float(traj_means.mean())
+    std_v  = float(traj_means.std()) if traj_means.std() > 0 else 1.0
+    z_scores = (traj_means - mean_v) / std_v
+
+    outliers = [
+        {"trajectory": i, "mean_v": round(float(traj_means[i]), 6),
+         "z_score": round(float(z_scores[i]), 3), "flag": bool(abs(z_scores[i]) > 3.0)}
+        for i in range(n_traj)
+    ]
+    flagged    = [o for o in outliers if o["flag"]]
+    unflagged  = [o for o in outliers if not o["flag"]][:max(0, 50 - len(flagged))]
+    outlier_table = sorted(flagged + unflagged, key=lambda x: abs(x["z_score"]), reverse=True)
+
+    valid_nc = node_counts_arr[node_counts_arr > 0]
+    return {
+        "velocity_bins":   velocity_bins,
+        "energy_bins":     energy_bins,
+        "node_count_bins": node_count_bins,
+        "outliers":        outlier_table,
+        "n_trajectories":  n_traj,
+        "total_nodes":     int(valid_nc.sum()) if len(valid_nc) else 0,
+        "mean_nodes":      round(float(valid_nc.mean()), 1) if len(valid_nc) else 0,
+    }
+
+
 @router.get("/samples")
 async def dataset_samples(domain: str = "cylinder_flow", split: str = "test"):
     """Return velocity/energy histograms and Z-score outlier table.
@@ -127,17 +210,25 @@ async def dataset_samples(domain: str = "cylinder_flow", split: str = "test"):
         raise HTTPException(400, "Domain '%s' is not available yet" % domain)
 
     data_dir = cfg["data_dir"]
-    npz_path = os.path.join(data_dir, "%s.npz" % split)
-    if not os.path.exists(npz_path):
-        raise HTTPException(404, "Dataset not found: %s" % npz_path)
 
-    dat_path = npz_path.replace(".npz", ".dat")
-    if not os.path.exists(dat_path):
-        raise HTTPException(404, "Velocity data file not found: %s" % dat_path)
-
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, _compute_samples, npz_path, dat_path
-    )
+    # Branch: cloth (flag_simple) uses per-trajectory npz files; CFD uses memmap
+    if domain == "flag_simple":
+        index_path = os.path.join(data_dir, f"{split}_index.npz")
+        if not os.path.exists(index_path):
+            raise HTTPException(404, "Cloth index file not found: %s" % index_path)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_samples_flag, data_dir, split
+        )
+    else:
+        npz_path = os.path.join(data_dir, "%s.npz" % split)
+        if not os.path.exists(npz_path):
+            raise HTTPException(404, "Dataset not found: %s" % npz_path)
+        dat_path = npz_path.replace(".npz", ".dat")
+        if not os.path.exists(dat_path):
+            raise HTTPException(404, "Velocity data file not found: %s" % dat_path)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_samples, npz_path, dat_path
+        )
     _samples_cache[cache_key] = result
     return result
 

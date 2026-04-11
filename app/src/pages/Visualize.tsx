@@ -43,6 +43,7 @@ export const Visualize: React.FC = () => {
     setPhysicsData(null);
     setPhysicsEverLoaded(false);
     setActiveTab('viewer');
+    setColorRange(null);
 
     fetch(`/api/results/${filename}`).then(r => r.json()).then(setMetadata);
     fetch(`/api/results/${filename}/rmse`).then(r => r.json()).then(setRmseData);
@@ -64,10 +65,23 @@ export const Visualize: React.FC = () => {
       .catch(() => setIsLoadingPhysics(false));
   }, [t, activeTab, filename]);
 
-  const mae = currentFrame ? d3.mean(currentFrame.error as number[]) ?? 0 : 0;
-  const maxErrorIdx = currentFrame ? d3.maxIndex(currentFrame.error as number[]) : -1;
-  const maxErrorVal = currentFrame && maxErrorIdx !== -1 ? currentFrame.error[maxErrorIdx] : 0;
+  const [colorRange, setColorRange] = useState<[number, number] | null>(null);
+
+  const mae = currentFrame ? d3.mean((currentFrame.error as (number|null)[]).filter((x): x is number => x !== null)) ?? 0 : 0;
+  const maxErrorIdx = currentFrame ? d3.maxIndex((currentFrame.error as (number|null)[]).filter((x): x is number => x !== null)) : -1;
+  const maxErrorVal = currentFrame && maxErrorIdx !== -1 ? (currentFrame.error as number[])[maxErrorIdx] : 0;
   const maxErrorPos = metadata && maxErrorIdx !== -1 ? metadata.crds[maxErrorIdx] : [0, 0];
+
+  // Compute a stable global color range from the first frame so cloth animation
+  // doesn't rescale the colormap every step (which looks like "only color change")
+  useEffect(() => {
+    if (!currentFrame || t !== 0) return;
+    const vals = (currentFrame.predicted_magnitude as (number|null)[]).filter((x): x is number => x !== null);
+    if (vals.length === 0) return;
+    const lo = d3.min(vals) ?? 0;
+    const hi = d3.max(vals) ?? 1;
+    setColorRange([lo, hi]);
+  }, [currentFrame, t]);
 
   const isGenerate: boolean = metadata?.is_generate === true;
 
@@ -207,9 +221,11 @@ export const Visualize: React.FC = () => {
                 <MeshPlot
                   crds={metadata.crds}
                   triangles={metadata.triangles}
-                  values={currentFrame.predicted_magnitude}
+                  values={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
                   title={`GNN Prediction — ${fieldLabel}`}
                   domain={metadata.domain}
+                  minVal={colorRange?.[0]}
+                  maxVal={colorRange?.[1]}
                 />
               </div>
             </div>
@@ -219,21 +235,21 @@ export const Visualize: React.FC = () => {
               <MeshPlot
                 crds={metadata.crds}
                 triangles={metadata.triangles}
-                values={currentFrame.target_magnitude}
+                values={(currentFrame.target_magnitude as (number|null)[]).map(v => v ?? 0)}
                 title={`Ground Truth — ${fieldLabel}`}
                 domain={metadata.domain}
               />
               <MeshPlot
                 crds={metadata.crds}
                 triangles={metadata.triangles}
-                values={currentFrame.predicted_magnitude}
+                values={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
                 title={`Prediction — ${fieldLabel}`}
                 domain={metadata.domain}
               />
               <MeshPlot
                 crds={metadata.crds}
                 triangles={metadata.triangles}
-                values={currentFrame.error}
+                values={(currentFrame.error as (number|null)[]).map(v => v ?? 0)}
                 title="Error Magnitude"
                 minVal={0}
                 maxVal={0.1}
@@ -279,7 +295,9 @@ export const Visualize: React.FC = () => {
               {!isGenerate && (
                 <div className="w-32 text-right">
                   <p className="text-[10px] text-slate-500 font-bold uppercase">Current RMSE</p>
-                  <p className="text-lg font-bold text-white font-mono">{currentFrame.rmse.toFixed(6)}</p>
+                  <p className="text-lg font-bold text-white font-mono">
+                    {currentFrame.rmse != null ? currentFrame.rmse.toFixed(6) : '—'}
+                  </p>
                 </div>
               )}
             </div>

@@ -36,6 +36,7 @@ class TrainConfig(BaseModel):
     output_size:              int   = 2
     node_input_size:          int   = 11
     edge_input_size:          int   = 3
+    fresh_start:              bool  = False   # if True, delete existing checkpoint before training
 
 
 class RemoteConfig(BaseModel):
@@ -92,7 +93,7 @@ def _parse_log(log_path: str) -> list[dict]:
     epochs = []
     if not os.path.exists(log_path):
         return epochs
-    with open(log_path, "r") as f:
+    with open(log_path, "r", errors="replace") as f:
         for line in f:
             if line.startswith("Epoch ") and "Train Loss:" in line:
                 try:
@@ -110,7 +111,7 @@ def _friendly_error(log_path: str) -> str:
     """Extract a human-readable error from a failed training log."""
     default = "Training failed to start — check that dependencies are installed."
     try:
-        with open(log_path, "r") as f:
+        with open(log_path, "r", errors="replace") as f:
             lines = [l.rstrip() for l in f.readlines() if l.strip()]
         for line in reversed(lines):
             if "RuntimeError" in line or "Error:" in line or "CUDA" in line:
@@ -255,6 +256,14 @@ def train_start(config: TrainConfig):
     # Write config JSON for train.py to consume
     os.makedirs("runs", exist_ok=True)
     cfg_path = "runs/ui_train_config.json"
+
+    # fresh_start: delete existing checkpoint so train.py starts from epoch 1
+    if config.fresh_start:
+        ckpt_path = domain_cfg["checkpoint"]
+        if os.path.exists(ckpt_path):
+            os.remove(ckpt_path)
+        # Also clear the in-memory model cache so the old weights aren't served
+        state.clear_model_cache()
     _DOMAIN_SIZES = {
         ("cylinder_flow", "velocity"):  {"output_size": 2, "node_input_size": 11, "edge_input_size": 3},
         ("cylinder_flow", "pressure"):  {"output_size": 1, "node_input_size": 10, "edge_input_size": 3},

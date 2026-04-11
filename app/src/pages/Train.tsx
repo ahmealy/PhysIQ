@@ -16,6 +16,7 @@ export const Train: React.FC = () => {
     message_passing_steps: 15,
     target_field: 'velocity',
   });
+  const [freshStart, setFreshStart] = useState(false);
 
   const [isRunning, setIsRunning] = useState(false);
   const [statusLoaded, setStatusLoaded] = useState(false);
@@ -232,13 +233,14 @@ export const Train: React.FC = () => {
     const res = await fetch('/api/train/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config),
+      body: JSON.stringify({ ...config, fresh_start: freshStart }),
     });
     if (res.ok) {
       setIsRunning(true);
       setStartTime(Date.now());
       setElapsed(0);
-      setLogLines(['--- Training started ---']);
+      setLogLines([freshStart ? '--- Training started fresh (checkpoint deleted) ---' : '--- Training started (resuming) ---']);
+      setFreshStart(false);   // reset after use
       setRemoteActive(remoteEnabled && !!remote.host);
       startStreaming();
     } else {
@@ -317,14 +319,27 @@ export const Train: React.FC = () => {
               Stop Training
             </button>
           ) : (
-            <button
-              onClick={handleStart}
-              disabled={arch !== 'GNS'}
-              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
-            >
-              <Play className="w-4 h-4 fill-current" />
-              Start Training
-            </button>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={freshStart}
+                  onChange={e => setFreshStart(e.target.checked)}
+                  className="accent-red-500 w-3.5 h-3.5"
+                />
+                <span className={freshStart ? 'text-red-400 font-bold' : 'text-slate-400'}>
+                  {freshStart ? 'Fresh start (checkpoint will be deleted)' : 'Start fresh'}
+                </span>
+              </label>
+              <button
+                onClick={handleStart}
+                disabled={arch !== 'GNS'}
+                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                Start Training
+              </button>
+            </div>
           )}
         </div>
       </header>

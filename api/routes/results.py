@@ -2,6 +2,7 @@
 /results/* endpoints — list, get metadata, get per-frame data, get RMSE, delete.
 """
 
+import math
 import os
 import pickle
 from collections import OrderedDict
@@ -131,6 +132,19 @@ def _compute_mae(predicted: np.ndarray, targets: np.ndarray,
     return np.mean(np.abs(pred_mag - target_mag), axis=1)  # [T]
 
 
+def _safe_float(v: float) -> Optional[float]:
+    """Return None for NaN/Inf so JSON serialisation never crashes."""
+    if not math.isfinite(v):
+        return None
+    return float(v)
+
+
+def _safe_list(arr: np.ndarray) -> list:
+    """Convert numpy array to list, replacing NaN/Inf with None."""
+    flat = arr.flatten().tolist()
+    return [None if (isinstance(x, float) and not math.isfinite(x)) else x for x in flat]
+
+
 def _get_triangles(crds: np.ndarray) -> np.ndarray:
     """Delaunay triangulation of 2D mesh coordinates. Returns [F, 3]."""
     triang = mtri.Triangulation(crds[:, 0], crds[:, 1])
@@ -179,7 +193,7 @@ def get_result(filename: str):
     is_generate = bool(meta.get("is_generate", False))
 
     # Compute a quick single scalar RMSE for the header badge (cheap: only step 0)
-    rmse_step0 = float(np.sqrt(np.mean(np.square(predicted[0] - targets[0]))))
+    rmse_step0 = _safe_float(float(np.sqrt(np.mean(np.square(predicted[0] - targets[0])))))
 
     return {
         "timesteps":        int(predicted.shape[0]),
@@ -216,6 +230,7 @@ def get_frame(filename: str, t: int):
         pred_mag   = predicted[t, :, 0]   # [N] — scalar pressure
         target_mag = targets[t, :, 0]     # [N]
     else:
+        # velocity (2D), world_pos (3D cloth), or any other multi-dim field
         pred_mag   = np.linalg.norm(predicted[t], axis=-1)   # [N]
         target_mag = np.linalg.norm(targets[t],   axis=-1)   # [N]
     error = np.abs(pred_mag - target_mag)   # [N]
@@ -224,10 +239,10 @@ def get_frame(filename: str, t: int):
     return {
         "t":                    t,
         "time_seconds":         round(t * 0.01, 3),
-        "predicted_magnitude":  pred_mag.tolist(),
-        "target_magnitude":     target_mag.tolist(),
-        "error":                error.tolist(),
-        "rmse":                 rmse,
+        "predicted_magnitude":  _safe_list(pred_mag),
+        "target_magnitude":     _safe_list(target_mag),
+        "error":                _safe_list(error),
+        "rmse":                 _safe_float(rmse),
         "target_field":         target_field,
     }
 
@@ -243,15 +258,15 @@ def get_rmse(filename: str):
     times = [round(i * 0.01, 3) for i in range(T)]
 
     return {
-        "per_step_rmse":  per_step_rmse.tolist(),
-        "per_step_mae":   per_step_mae.tolist(),
+        "per_step_rmse":  [_safe_float(v) for v in per_step_rmse.tolist()],
+        "per_step_mae":   [_safe_float(v) for v in per_step_mae.tolist()],
         "times":          times,
-        "rmse_at_0":      float(per_step_rmse[0]),
-        "rmse_at_300":    float(per_step_rmse[min(299, T - 1)]),
-        "rmse_at_599":    float(per_step_rmse[min(598, T - 1)]),
-        "mae_at_0":       float(per_step_mae[0]),
-        "mae_at_end":     float(per_step_mae[-1]),
-        "growth_ratio":   float(per_step_rmse[-1] / (per_step_rmse[0] + 1e-12)),
+        "rmse_at_0":      _safe_float(float(per_step_rmse[0])),
+        "rmse_at_300":    _safe_float(float(per_step_rmse[min(299, T - 1)])),
+        "rmse_at_599":    _safe_float(float(per_step_rmse[min(598, T - 1)])),
+        "mae_at_0":       _safe_float(float(per_step_mae[0])),
+        "mae_at_end":     _safe_float(float(per_step_mae[-1])),
+        "growth_ratio":   _safe_float(float(per_step_rmse[-1] / (per_step_rmse[0] + 1e-12))),
         "target_field":   target_field,
     }
 

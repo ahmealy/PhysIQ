@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes import status, train, dataset, rollout, results, physics, generate
 
 app = FastAPI(
-    title="MeshGraphNets Physics AI",
+    title="MeshGraph Generate",
     description="Graph neural network physics simulation — REST API",
     version="1.0.0",
     docs_url="/api/docs",
@@ -46,7 +46,7 @@ app.include_router(generate.router, prefix="/api", tags=["Generate"])
 @app.get("/api", tags=["System"])
 def root():
     return {
-        "project": "MeshGraphNets Physics AI",
+        "project": "MeshGraph Generate",
         "docs":    "/api/docs",
         "redoc":   "/api/redoc",
     }

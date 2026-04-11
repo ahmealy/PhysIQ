@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Sparkles, Square, AlertCircle, Info } from 'lucide-react';
 import { CandidateCard } from '../components/CandidateCard';
 import { OptimizationChart } from '../components/OptimizationChart';
@@ -105,8 +106,24 @@ export const Generate: React.FC = () => {
   const [gnnProgress, setGnnProgress]   = useState<{done: number; total: number} | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const navigate = useNavigate();
 
   const domCfg = DOMAIN_CONFIGS[config.domain as keyof typeof DOMAIN_CONFIGS];
+
+  // ── Analyze handler — run rollout then open Visualize ─────────────────────
+
+  const handleAnalyze = useCallback(async (sessionId: string, candidateId: number) => {
+    const res = await fetch(
+      `/api/generate/rollout/${sessionId}/${candidateId}?n_steps=50&device=${config.device}`,
+      { method: 'POST' }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? 'Rollout failed');
+    }
+    const { pkl_filename } = await res.json();
+    navigate(`/visualize?file=${encodeURIComponent(pkl_filename)}`);
+  }, [config.device, navigate]);
 
   // ── Persist state to localStorage ─────────────────────────────────────────
 
@@ -215,7 +232,7 @@ export const Generate: React.FC = () => {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">
-            PhysicsAI Generate
+            MeshGraph Generate
           </h1>
           <p className="text-sm text-slate-400 mt-0.5">
             Generate novel mesh designs conditioned on physics targets
@@ -437,6 +454,8 @@ export const Generate: React.FC = () => {
                 scoreGap={c.score_gap}
                 gnnConverged={c.gnn_converged}
                 gnnFailed={c.gnn_failed}
+                sessionId={c.session_id ?? null}
+                onAnalyze={c.domain === 'cylinder_flow' ? handleAnalyze : undefined}
               />
             ))}
           </div>

@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { cn } from '@/src/lib/utils';
-import { Zap, AlertTriangle, CheckCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle, PlayCircle, Loader2 } from 'lucide-react';
 
 interface CandidateCardProps {
   id: number;
@@ -20,6 +20,9 @@ interface CandidateCardProps {
   scoreGap?: number | null;
   gnnConverged?: boolean | null;
   gnnFailed?: boolean;
+  // Analyze button
+  sessionId?: string | null;
+  onAnalyze?: (sessionId: string, candidateId: number) => Promise<void>;
 }
 
 /**
@@ -48,7 +51,21 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
   scoreGap,
   gnnConverged,
   gnnFailed,
+  sessionId,
+  onAnalyze,
 }) => {
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const handleAnalyze = async (e: React.MouseEvent) => {
+    e.stopPropagation();  // don't fire onSelect
+    if (!sessionId || !onAnalyze || analyzing) return;
+    setAnalyzing(true);
+    try {
+      await onAnalyze(sessionId, id);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
   const pctError = targetValue !== 0
     ? ((Math.abs(predictedValue - targetValue) / Math.abs(targetValue)) * 100).toFixed(1)
     : null;  // null when target is 0 — avoids NaN from parseFloat("—")
@@ -166,6 +183,26 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
             <span className="text-slate-300 font-mono">{typeof val === 'number' ? val.toFixed(4) : val}</span>
           </div>
         ))}
+
+        {/* Analyze button — only shown when sessionId available (CFD domain) */}
+        {sessionId && onAnalyze && (
+          <button
+            onClick={handleAnalyze}
+            disabled={analyzing}
+            className={cn(
+              "mt-1 w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg",
+              "text-[11px] font-medium transition-colors",
+              analyzing
+                ? "bg-violet-900/30 text-violet-400 cursor-wait"
+                : "bg-violet-600/20 hover:bg-violet-600/40 text-violet-300 border border-violet-500/30"
+            )}
+          >
+            {analyzing
+              ? <><Loader2 className="w-3 h-3 animate-spin" /> Running rollout…</>
+              : <><PlayCircle className="w-3 h-3" /> Analyze</>
+            }
+          </button>
+        )}
       </div>
     </div>
   );

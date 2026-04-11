@@ -1,5 +1,5 @@
 """
-/generate endpoint — PhysicsAI Generate
+/generate endpoint — MeshGraph Generate
 ========================================
 SSE stream that samples novel mesh designs from the CVAE and evaluates
 them using the MeshGraphNets predictor.
@@ -12,6 +12,10 @@ POST /api/generate
 
 GET /api/generate/thumbnail/{session_id}/{candidate_id}
     Returns a PNG image of the candidate mesh with node-type colour coding.
+
+POST /api/generate/rollout/{session_id}/{candidate_id}
+    Runs a 50-step GNN rollout on the cached graph, saves a pkl to result/,
+    and returns {"pkl_filename": "generate_<session>_<id>.pkl"}.
 
 Design principles
 -----------------
@@ -50,6 +54,9 @@ _THUMBNAIL_CACHE_MAX_SESSIONS = 100
 _thumbnail_cache: dict[str, dict[int, bytes]] = {}
 _cache_order: list[str] = []  # insertion-order LRU tracker
 
+# Graph cache: session_id → {candidate_id → PyG Data}  (for rollout endpoint)
+_graph_cache: dict[str, dict] = {}
+
 
 def _cache_session(session_id: str, thumbnails: dict[int, bytes]) -> None:
     """Insert a session into the thumbnail cache, evicting the oldest if over capacity."""
@@ -58,6 +65,7 @@ def _cache_session(session_id: str, thumbnails: dict[int, bytes]) -> None:
     elif len(_thumbnail_cache) >= _THUMBNAIL_CACHE_MAX_SESSIONS:
         oldest = _cache_order.pop(0)
         _thumbnail_cache.pop(oldest, None)
+        _graph_cache.pop(oldest, None)
     _thumbnail_cache[session_id] = thumbnails
     _cache_order.append(session_id)
 
@@ -208,8 +216,12 @@ class CFDDesignSampler(BaseDesignSampler):
                 detector = OODDetector.from_index_file(
                     "runs/embedding_index.pkl", simulator=sim, device=device
                 )
-        except Exception:
-            pass
+        except Exception as _ood_exc:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "OOD detector failed to initialise (confidence will show N/A): %s",
+                _ood_exc, exc_info=True
+            )
 
         # ── Build meshes ─────────────────────────────────────────────────────
         builder    = CFDMeshBuilder()
@@ -615,12 +627,14 @@ def _sse_event(event: str, data: dict) -> str:
 @router.post("/generate")
 async def generate(req: GenerateRequest):
     """
-    PhysicsAI Generate — sample novel designs + predict physics.
+    MeshGraph Generate — sample novel designs + predict physics.
 
     Returns a Server-Sent Events (SSE) stream:
-        event: candidate  data: { CandidateResult fields... }
-        event: error      data: { "detail": "..." }
-        event: done       data: { "best_id": int }
+        event: candidate   data: { CandidateResult fields... }
+        event: gnn_score   data: { id, gnn_predicted_value, score_gap, ... }
+        event: warning     data: { "detail": "..." }
+        event: error       data: { "detail": "..." }
+        event: done        data: { "best_id": int }
     """
     if req.domain not in _DOMAIN_SAMPLERS:
         raise HTTPException(
@@ -689,6 +703,8 @@ async def generate(req: GenerateRequest):
             # Cache all thumbnails before streaming so every URL is live when
             # the browser receives the first candidate event.
             _cache_session(session_id, session_thumbs)
+            # Also cache graphs for the rollout endpoint.
+            _graph_cache[session_id] = {c.id: graph for c, graph in results}
 
             for c, _ in results:
                 payload                  = asdict(c)
@@ -777,3 +793,98 @@ async def get_thumbnail(session_id: str, candidate_id: int):
     if png is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return Response(content=png, media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Rollout endpoint — run GNN on a cached generated candidate
+# ---------------------------------------------------------------------------
+
+@router.post("/generate/rollout/{session_id}/{candidate_id}")
+async def generate_rollout(session_id: str, candidate_id: int,
+                           n_steps: int = 50, device: str = "cpu"):
+    """
+    Run a short GNN rollout on a previously generated candidate graph,
+    save a pkl to result/, and return the filename so the caller can
+    open /visualize?file=<filename>.
+
+    The graph must be in the in-memory _graph_cache, which is populated
+    during the /generate SSE call and lives for the session lifetime
+    (up to 100 sessions, LRU-evicted).
+    """
+    import pickle
+    import logging
+
+    session_graphs = _graph_cache.get(session_id)
+    if session_graphs is None:
+        raise HTTPException(status_code=404,
+                            detail="Session not found — regenerate candidates first.")
+    graph = session_graphs.get(candidate_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Candidate not found in session.")
+
+    from api.state import get_model, DOMAINS
+    cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
+    if not os.path.exists(cfd_ckpt):
+        raise HTTPException(status_code=503,
+                            detail="GNN checkpoint not found — cannot run rollout.")
+
+    loop = asyncio.get_running_loop()
+
+    def _run_rollout():
+        import torch
+        import torch_geometric.transforms as T
+        from utils.utils import NodeType
+
+        sim = get_model(cfd_ckpt, device=device)
+        sim.eval()
+
+        g = graph.clone()
+        if g.edge_index is None:
+            transformer = T.Compose([
+                T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)
+            ])
+            g = transformer(g)
+        g = g.to(device)
+
+        node_type    = g.x[:, 0].long()
+        current_vel  = g.x[:, 1:3].clone()
+        original_x   = g.x.clone()
+        boundary_mask = ~((node_type == int(NodeType.NORMAL)) |
+                          (node_type == int(NodeType.OUTFLOW)))
+
+        predicted_frames = []
+        with torch.no_grad():
+            for _ in range(n_steps):
+                g.x = original_x.clone()
+                g.x[:, 1:3] = current_vel
+                next_vel = sim(g, velocity_sequence_noise=None)
+                next_vel[boundary_mask] = current_vel[boundary_mask]
+                current_vel = next_vel
+                predicted_frames.append(current_vel.cpu().numpy())   # [N, 2]
+
+        import numpy as np
+        predicted_arr = np.stack(predicted_frames)    # [T, N, 2]
+        targets_arr   = predicted_arr.copy()          # no ground truth — use predicted as target
+        crds          = graph.pos.numpy()             # [N, 2]
+
+        os.makedirs("result", exist_ok=True)
+        filename = f"generate_{session_id[:8]}_{candidate_id}.pkl"
+        pkl_path = os.path.join("result", filename)
+        with open(pkl_path, "wb") as f:
+            pickle.dump(
+                [[predicted_arr, targets_arr], crds, {
+                    "domain":           "cylinder_flow",
+                    "target_field":     "velocity",
+                    "confidence_score": None,
+                }],
+                f,
+            )
+        logging.getLogger(__name__).info("Saved generate rollout to %s", pkl_path)
+        return filename
+
+    try:
+        filename = await loop.run_in_executor(None, _run_rollout)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Rollout failed: {exc}")
+
+    return {"pkl_filename": filename}

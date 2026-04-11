@@ -1,5 +1,5 @@
 {
-  "name": "MeshGraphNets Physics AI",
+  "name": "MeshGraph Generate",
   "description": "AI-accelerated physics simulation using Graph Neural Networks for engineering meshes.",
   "requestFramePermissions": []
 }

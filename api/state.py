@@ -50,7 +50,8 @@ def get_train_start_time() -> int | None:
 
 
 def clear_train_pid() -> None:
-    for path in (_train_pid_file, _train_remote_pid_file, _train_start_time_file):
+    _heartbeat = os.path.join(_project_root, "runs", "train_heartbeat")
+    for path in (_train_pid_file, _train_remote_pid_file, _train_start_time_file, _heartbeat):
         try:
             os.remove(path)
         except FileNotFoundError:
@@ -79,10 +80,17 @@ def get_orphan_pid() -> Optional[int]:
                     time.time() - os.path.getmtime(train_log_path)
                     if os.path.exists(train_log_path) else 9999
                 )
-                if log_age < 120:
-                    # Log updated recently — training is alive
+                # Also check heartbeat file (touched every 60s by the remote launcher)
+                _heartbeat = os.path.join(_project_root, "runs", "train_heartbeat")
+                heartbeat_age = (
+                    time.time() - os.path.getmtime(_heartbeat)
+                    if os.path.exists(_heartbeat) else 9999
+                )
+                alive = log_age < 3600 or heartbeat_age < 180
+                if alive:
+                    # Log or heartbeat updated recently — training is alive
                     return remote_pid
-                # Log stale for >120s — training likely finished/died
+                # Both log and heartbeat stale — training likely finished/died
                 clear_train_pid()
                 return None
         except (ValueError, OSError):

@@ -309,15 +309,21 @@ def train_start(config: TrainConfig):
         # Write a bash launcher script on shared NFS — avoids all csh quoting issues.
         # nohup detaches train.py from the SSH session so it survives server restarts.
         launcher_path = os.path.join(project_root, "runs", "train_launcher.sh")
+        heartbeat_path = os.path.join(project_root, "runs", "train_heartbeat")
         with open(launcher_path, "w") as lf:
             lf.write("#!/bin/bash\n")
             lf.write(f"cd {shlex.quote(project_root)}\n")
-            # Use explicit variable to capture PID reliably
+            # Launch train.py in background, capture PID
             lf.write(f"nohup {shlex.quote(venv_py)} -u train.py --config {shlex.quote(cfg_abs)}"
                      f" >> {shlex.quote(log_abs)} 2>&1 &\n")
             lf.write("TRAIN_PID=$!\n")
             lf.write(f"printf '%s' \"$TRAIN_PID\" > {shlex.quote(remote_pid_file)}\n")
             lf.write("echo REMOTE_PID:$TRAIN_PID\n")
+            # Heartbeat: touch a file every 60s while train.py is alive.
+            # Cloth (flag_simple) epochs can take hours, so the log isn't written for
+            # a long time — heartbeat lets the UI distinguish "running" from "dead".
+            lf.write(f"( while kill -0 $TRAIN_PID 2>/dev/null; do"
+                     f" touch {shlex.quote(heartbeat_path)}; sleep 60; done ) &\n")
         os.chmod(launcher_path, 0o755)
 
         remote_cmd = f"bash {shlex.quote(launcher_path)}"

@@ -42,8 +42,9 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
     ? ((Math.abs(predictedValue - targetValue) / Math.abs(targetValue)) * 100).toFixed(1)
     : '—';
 
-  const physLabel = domain === 'cylinder_flow' ? 'Drag proxy' : 'Stress proxy';
-  const confPct   = (oodConfidence * 100).toFixed(0);
+  const physLabel    = domain === 'cylinder_flow' ? 'Drag proxy' : 'Stress proxy';
+  const hasConf      = oodConfidence >= 0;
+  const confPct      = hasConf ? (oodConfidence * 100).toFixed(0) : null;
 
   return (
     <div
@@ -71,13 +72,17 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
         {/* OOD badge overlay */}
         <div className={cn(
           "absolute top-2 right-2 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold",
-          isOod
-            ? "bg-amber-500/20 border border-amber-500/40 text-amber-400"
-            : "bg-emerald-500/20 border border-emerald-500/40 text-emerald-400"
+          !hasConf
+            ? "bg-slate-700/60 border border-slate-600/40 text-slate-400"
+            : isOod
+              ? "bg-amber-500/20 border border-amber-500/40 text-amber-400"
+              : "bg-emerald-500/20 border border-emerald-500/40 text-emerald-400"
         )}>
-          {isOod
-            ? <><AlertTriangle className="w-2.5 h-2.5" /> OOD</>
-            : <><CheckCircle className="w-2.5 h-2.5" /> {confPct}% conf</>
+          {!hasConf
+            ? <>N/A conf</>
+            : isOod
+              ? <><AlertTriangle className="w-2.5 h-2.5" /> OOD</>
+              : <><CheckCircle className="w-2.5 h-2.5" /> {confPct}% conf</>
           }
         </div>
 

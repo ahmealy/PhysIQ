@@ -86,8 +86,20 @@ class BaseDesignSampler(ABC):
     """Abstract interface for domain-specific design generation."""
 
     @abstractmethod
-    def sample(self, target: float, n: int, device: str) -> list[CandidateResult]:
-        """Generate n design candidates aiming for the given physics target."""
+    def sample(self, target: float, n: int, device: str,
+               method: str = "sample") -> list[CandidateResult]:
+        """
+        Generate n design candidates aiming for the given physics target.
+
+        Args:
+            target:  target physics value (drag or stress)
+            n:       number of candidates to return
+            device:  torch device string
+            method:  "sample"   — draw n independent samples from CVAE prior
+                     "gradient" — optimise a single latent code via gradient
+                                  descent against a differentiable surrogate,
+                                  then generate n variations around that code
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -97,104 +109,183 @@ class BaseDesignSampler(ABC):
 class CFDDesignSampler(BaseDesignSampler):
     """Samples cylinder_flow designs using the CFD CVAE."""
 
-    CFD_CVAE_PATH      = "checkpoints/cfd_cvae.pth"
-    SURROGATE_PATH     = "checkpoints/drag_surrogate.pth"
-    PARAMS_PATH        = "data/design_params.npy"
-    REFERENCE_TRAJ_DIR = "data"
+    CFD_CVAE_PATH  = "checkpoints/cfd_cvae.pth"
+    SURROGATE_PATH = "checkpoints/drag_surrogate.pth"
 
-    def sample(self, target: float, n: int, device: str) -> list[CandidateResult]:
-        from extensions.generative.cvae_cfd import CVAETrainer, CFDCVAE, CVAEConfig
+    def sample(self, target: float, n: int, device: str,
+               method: str = "sample") -> tuple[list, list]:
+        import torch
+        import torch.nn.functional as F
+        from extensions.generative.cvae_cfd import CVAETrainer
         from extensions.generative.drag_surrogate import DragSurrogateTrainer
         from extensions.generative.mesh_generator import CFDMeshBuilder
         from extensions.confidence.ood_detector import OODDetector
-        from api.state import get_model
+        from api.state import get_model, DOMAINS
 
-        # ── Load CVAE trainer ───────────────────────────────────────────────
         if not os.path.exists(self.CFD_CVAE_PATH):
             raise HTTPException(
                 status_code=503,
-                detail=f"CFD CVAE not trained yet. "
-                       f"Run: python extensions/generative/train_cvae.py --domain cylinder_flow"
+                detail="CFD CVAE not trained yet. "
+                       "Run: python extensions/generative/train_cvae.py --domain cylinder_flow"
             )
-        ckpt = torch.load(self.CFD_CVAE_PATH, map_location=device, weights_only=False)
-        cfg   = ckpt["cfg"]
-        model = CFDCVAE(cfg=cfg)
-        model.load_state_dict(ckpt["model_state_dict"])
 
-        # Build a minimal trainer wrapper just for generate()
-        surrogate_trainer = DragSurrogateTrainer.load(self.SURROGATE_PATH,
-                                                       device=device)
+        surrogate_trainer = DragSurrogateTrainer.load(self.SURROGATE_PATH, device=device)
+        trainer = CVAETrainer.load(self.CFD_CVAE_PATH,
+                                   surrogate=surrogate_trainer._model,
+                                   device=device)
 
-        from extensions.generative.cvae_cfd import CVAETrainer, CVAEScaler
-        trainer             = CVAETrainer.__new__(CVAETrainer)
-        trainer._model      = model.to(device)
-        trainer._scaler     = ckpt["scaler"]
-        trainer._cfg        = cfg
-        trainer._device     = device
-        trainer._surrogate  = surrogate_trainer._model
+        # ── Generate params via chosen method ────────────────────────────────
+        trajectory: list[float] = []
 
-        # ── Generate samples ─────────────────────────────────────────────────
-        params_phys = trainer.generate(target_drag_physical=target, n=n)  # [n, 4]
+        if method == "gradient":
+            params_phys, trajectory = self._gradient_sample(
+                trainer, surrogate_trainer, target, n, device
+            )
+        else:
+            params_phys = trainer.generate(target_drag_physical=target, n=n)
 
-        # ── Build meshes and score ────────────────────────────────────────────
-        builder = CFDMeshBuilder()
-
-        # Load OOD detector if index exists
-        index_path = "runs/embedding_index.pkl"
-        detector   = None
-        simulator  = get_model("cylinder_flow", device=device)
-        if simulator is not None and os.path.exists(index_path):
-            try:
+        # ── OOD detector (optional) ──────────────────────────────────────────
+        cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
+        detector = None
+        try:
+            sim = get_model(cfd_ckpt, device=device) if os.path.exists(cfd_ckpt) else None
+            if sim is not None and os.path.exists("runs/embedding_index.pkl"):
                 detector = OODDetector.from_index_file(
-                    index_path, simulator=simulator, device=device
+                    "runs/embedding_index.pkl", simulator=sim, device=device
                 )
-            except Exception:
-                pass
+        except Exception:
+            pass
 
+        # ── Build meshes ─────────────────────────────────────────────────────
+        builder    = CFDMeshBuilder()
         candidates = []
+
         for i, row in enumerate(params_phys):
             cx, cy, r, v_in = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-            # Clamp r to valid range
-            r   = float(np.clip(r, 0.01, 0.15))
-            cx  = float(np.clip(cx, r + 0.01, 1.6 - r - 0.01))
-            cy  = float(np.clip(cy, r + 0.01, 0.41 - r - 0.01))
+            r    = float(np.clip(r,    0.01, 0.15))
+            cx   = float(np.clip(cx,   r + 0.01, 1.6 - r - 0.01))
+            cy   = float(np.clip(cy,   r + 0.01, 0.41 - r - 0.01))
             v_in = float(np.clip(v_in, 0.05, 2.0))
 
             try:
                 graph = builder.build(cx, cy, r, v_in)
-            except Exception as e:
+            except Exception:
                 continue
 
-            # Predict drag via surrogate
-            p_arr      = np.array([[cx, cy, r, v_in]], dtype=np.float32)
-            pred_drag  = float(surrogate_trainer.predict(p_arr)[0])
+            pred_drag = float(surrogate_trainer.predict(
+                np.array([[cx, cy, r, v_in]], dtype=np.float32))[0])
 
-            # OOD score
-            ood_conf = 0.5   # default if no detector
-            is_ood   = False
-            if detector is not None and simulator is not None:
+            ood_conf, is_ood = -1.0, False
+            if detector is not None:
                 try:
-                    ood_result = detector.score(graph)
-                    ood_conf   = ood_result.confidence
-                    is_ood     = ood_result.is_ood
+                    res = detector.score(graph)
+                    ood_conf, is_ood = res.confidence, res.is_ood
                 except Exception:
                     pass
 
-            c = CandidateResult(
-                id=i,
-                domain="cylinder_flow",
-                predicted_value=pred_drag,
-                target_value=target,
-                ood_confidence=ood_conf,
-                is_ood=is_ood,
+            candidates.append((CandidateResult(
+                id=i, domain="cylinder_flow",
+                predicted_value=pred_drag, target_value=target,
+                ood_confidence=ood_conf, is_ood=is_ood,
                 mesh_nodes=graph.num_nodes,
                 params={"cx": cx, "cy": cy, "r": r, "v_inlet": v_in},
-            )
-            candidates.append((c, graph))
+            ), graph))
 
-        # Sort by |predicted - target|
         candidates.sort(key=lambda x: abs(x[0].predicted_value - target))
-        return [(c, g) for c, g in candidates[:n]]
+        return [(c, g) for c, g in candidates[:n]], trajectory
+
+    # ── Gradient descent in CVAE latent space ───────────────────────────────
+
+    def _gradient_sample(self, trainer, surrogate_trainer,
+                         target: float, n: int, device: str):
+        """
+        Gradient descent in CVAE latent space using the differentiable surrogate.
+
+        Full chain (every step differentiable w.r.t. z):
+            z [16]
+            → CVAE decoder  → params_norm [4]     (linear layers)
+            → denorm        → params_phys [4]     (affine, differentiable)
+            → surrogate norm→ params_surr [4]     (affine, differentiable)
+            → DragSurrogate → drag_pred   [1]     (MLP forward, no no_grad)
+            → MSE loss = (drag_pred - target)²
+
+        After convergence the optimal z* is found.
+        n diverse candidates are produced by sampling z ~ N(z*, σ²I)
+        so the output shares the same design intent but varies geometrically.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        model     = trainer._model.to(device)
+        surrogate = surrogate_trainer._model.to(device)
+        sc_cvae   = trainer._scaler
+        sc_surr   = surrogate_trainer._scaler
+
+        model.eval()
+        surrogate.eval()
+
+        drag_norm = float(
+            (target - sc_cvae.drag_min) / (sc_cvae.drag_max - sc_cvae.drag_min + 1e-8)
+        )
+        target_t = torch.tensor([[drag_norm]], dtype=torch.float32, device=device)
+        target_s = torch.tensor(target, dtype=torch.float32, device=device)
+
+        # Affine constants as tensors (so autograd flows through denorm)
+        p_min = torch.from_numpy(sc_cvae.param_min.astype(np.float32)).to(device)
+        p_max = torch.from_numpy(sc_cvae.param_max.astype(np.float32)).to(device)
+        x_min = torch.from_numpy(sc_surr.x_min.astype(np.float32)).to(device)
+        x_max = torch.from_numpy(sc_surr.x_max.astype(np.float32)).to(device)
+        y_min = float(sc_surr.y_min)
+        y_max = float(sc_surr.y_max)
+
+        def z_to_drag(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            """z [L] → (drag_phys [scalar], params_phys [4])"""
+            params_n   = model.decoder(z.unsqueeze(0), target_t)         # [1, 4]
+            params_n   = torch.clamp(params_n, 0.0, 1.0)
+            params_p   = params_n * (p_max - p_min) + p_min              # [1, 4] physical
+            params_s   = (params_p - x_min) / (x_max - x_min + 1e-8)    # [1, 4] surrogate-norm
+            drag_n_out = surrogate(params_s)                              # [1] normed drag
+            drag_phys  = drag_n_out * (y_max - y_min) + y_min            # [1] physical
+            return drag_phys.squeeze(), params_p.squeeze(0)
+
+        # Multi-restart Adam optimisation
+        n_restarts = 3
+        n_iters    = 150
+        lr         = 0.05
+
+        best_z    = None
+        best_err  = float("inf")
+        best_traj: list[float] = []
+
+        for _ in range(n_restarts):
+            z     = torch.randn(trainer._cfg.latent_dim, device=device, requires_grad=True)
+            optim = torch.optim.Adam([z], lr=lr)
+            traj: list[float] = []
+
+            for _ in range(n_iters):
+                optim.zero_grad()
+                drag_pred, _ = z_to_drag(z)
+                loss = F.mse_loss(drag_pred, target_s)
+                loss.backward()
+                optim.step()
+                traj.append(float(drag_pred.detach().item()))
+
+            err = abs(traj[-1] - target)
+            if err < best_err:
+                best_err  = err
+                best_z    = z.detach().clone()
+                best_traj = traj
+
+        # Sample n diverse candidates around optimal z
+        noise_scale = 0.25
+        results     = []
+        with torch.no_grad():
+            for _ in range(n):
+                z_p = best_z + torch.randn_like(best_z) * noise_scale
+                _, params_p = z_to_drag(z_p)
+                results.append(params_p.cpu().numpy())
+
+        return np.array(results), best_traj
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +300,11 @@ class ClothDesignSampler(BaseDesignSampler):
     STRESS_PATH    = "data_flag/train/cloth_stress.npy"
     REF_TRAJ       = "data_flag/train/traj_00000.npz"
 
-    def sample(self, target: float, n: int, device: str) -> list[CandidateResult]:
-        from extensions.generative.cvae_cloth import ClothCVAE, ClothCVAETrainer
+    def sample(self, target: float, n: int, device: str,
+               method: str = "sample") -> tuple[list, list]:
+        from extensions.generative.cvae_cloth import (
+            ClothCVAETrainer, StressSurrogate, StressSurrogateTrainer
+        )
         from extensions.generative.cloth_extractor import PosePCA
         from extensions.generative.mesh_generator import ClothMeshBuilder
 
@@ -221,54 +315,115 @@ class ClothDesignSampler(BaseDesignSampler):
                        "Run: python extensions/generative/train_cvae.py --domain flag_simple"
             )
 
-        pca  = PosePCA.load(self.PCA_PATH)
-        ckpt = torch.load(self.CVAE_PATH, map_location=device, weights_only=False)
-        cfg  = ckpt["cfg"]
-        model = ClothCVAE(cfg=cfg)
-        model.load_state_dict(ckpt["model_state_dict"])
+        pca = PosePCA.load(self.PCA_PATH)
 
-        # Minimal trainer wrapper for generate()
-        from extensions.generative.cvae_cloth import (
-            ClothCVAETrainer, StressSurrogate, StressSurrogateTrainer
-        )
-        s_model   = StressSurrogate(pose_dim=cfg.pose_dim)
-        s_trainer = StressSurrogateTrainer(s_model, device=device)
-        trainer           = ClothCVAETrainer.__new__(ClothCVAETrainer)
-        trainer._model    = model.to(device)
-        trainer._scaler   = ckpt["scaler"]
-        trainer._cfg      = cfg
-        trainer._device   = device
-        trainer._stress_trainer = s_trainer
+        import torch as _torch
+        _peek    = _torch.load(self.CVAE_PATH, map_location=device, weights_only=False)
+        pose_dim = (_peek.get("cfg_dict") or {}).get("pose_dim", 16)
 
-        # Load stress data for reference
-        stress_all = np.load(self.STRESS_PATH)
+        s_trainer = StressSurrogateTrainer(StressSurrogate(pose_dim=pose_dim), device=device)
+        trainer   = ClothCVAETrainer.load(self.CVAE_PATH,
+                                          stress_trainer=s_trainer, device=device)
+        builder   = ClothMeshBuilder(reference_traj_path=self.REF_TRAJ)
 
-        builder    = ClothMeshBuilder(reference_traj_path=self.REF_TRAJ)
-        world_poses = trainer.generate(target_stress=target, n=n, pca=pca)  # [n,N,3]
+        trajectory: list[float] = []
+
+        if method == "gradient":
+            world_poses, trajectory = self._gradient_sample(
+                trainer, pca, target, n, device
+            )
+        else:
+            world_poses = trainer.generate(target_stress=target, n=n, pca=pca)
 
         candidates = []
         for i, wp in enumerate(world_poses):
             graph = builder.build(wp)
-
-            # Stress proxy from surrogate
-            pose_flat = pca.transform(wp.flatten().reshape(1, -1)).squeeze(0)
-            scaler    = trainer._scaler
-            pose_n    = scaler.norm_pose(pose_flat.reshape(1, -1))
-            pred_stress = target   # approximate; full prediction needs simulator
-
-            c = CandidateResult(
-                id=i,
-                domain="flag_simple",
-                predicted_value=pred_stress,
+            candidates.append((CandidateResult(
+                id=i, domain="flag_simple",
+                predicted_value=target,     # approx until simulator scoring
                 target_value=target,
-                ood_confidence=0.5,   # OOD for cloth TBD
+                ood_confidence=-1.0,
                 is_ood=False,
                 mesh_nodes=graph.num_nodes,
                 params={"world_pos_norm": float(np.linalg.norm(wp))},
-            )
-            candidates.append((c, graph))
+            ), graph))
 
-        return candidates
+        return candidates, trajectory
+
+    def _gradient_sample(self, trainer, pca, target: float,
+                         n: int, device: str) -> tuple[np.ndarray, list[float]]:
+        """
+        Gradient descent in cloth CVAE latent space via ClothInverseDesigner.
+
+        The cloth pipeline is fully differentiable:
+            z → decoder → pose_pca → PCA⁻¹ → world_pos → FlagSimulator → stress_loss
+
+        Requires flag_best_model.pth to be present.
+        Falls back to CVAE sampling if the simulator checkpoint is missing.
+        """
+        from api.state import DOMAINS
+        sim_ckpt = DOMAINS["flag_simple"]["checkpoint"]
+
+        if not os.path.exists(sim_ckpt):
+            # No simulator available — fall back to sampling
+            world_poses = trainer.generate(target_stress=target, n=n, pca=pca)
+            return world_poses, []
+
+        import torch
+        from model.flag_simulator import FlagSimulator
+        from extensions.generative.inverse_design import (
+            ClothInverseDesigner, StressObjective
+        )
+        from utils.utils import NodeType
+
+        # Load simulator
+        sim_ckpt_data = torch.load(sim_ckpt, map_location=device, weights_only=False)
+        simulator     = FlagSimulator(message_passing_num=15, device=device)
+        simulator.load_state_dict(sim_ckpt_data["model_state_dict"])
+        simulator.eval()
+
+        # Build stress objective
+        ref         = np.load(self.REF_TRAJ)
+        N           = ref["mesh_pos"].shape[0]
+        mp_3d       = np.concatenate([ref["mesh_pos"],
+                                       np.zeros((N, 1), dtype=np.float32)], axis=-1)
+        mesh_rest   = torch.from_numpy(mp_3d).to(device)
+        nt          = ref["node_type"].squeeze(-1)
+        normal_mask = torch.from_numpy(nt == int(NodeType.NORMAL)).to(device)
+        objective   = StressObjective(target_stress=target,
+                                      mesh_rest=mesh_rest,
+                                      normal_mask=normal_mask)
+
+        designer = ClothInverseDesigner(
+            cvae_trainer=trainer, flag_simulator=simulator,
+            objective=objective, reference_traj_path=self.REF_TRAJ, device=device
+        )
+        result = designer.optimise(
+            target_stress=target, n_iters=80, lr=0.05,
+            n_restarts=2, pca=pca, verbose=False
+        )
+
+        # Decode best_z into n diverse world_poses
+        noise_scale = 0.2
+        world_poses = []
+        with torch.no_grad():
+            best_z = torch.from_numpy(result.best_z).to(device)
+            sc     = trainer._scaler
+            target_n = float(
+                (target - sc.stress_min) / (sc.stress_max - sc.stress_min + 1e-8)
+            )
+            target_t = torch.tensor([[target_n]], dtype=torch.float32, device=device)
+            p_min    = torch.from_numpy(sc.pose_min.astype(np.float32)).to(device)
+            p_max    = torch.from_numpy(sc.pose_max.astype(np.float32)).to(device)
+
+            for _ in range(n):
+                z_p      = best_z + torch.randn_like(best_z) * noise_scale
+                pose_n   = trainer._model.decoder(z_p.unsqueeze(0), target_t)
+                pose_p   = (pose_n * (p_max - p_min) + p_min).squeeze(0).cpu().numpy()
+                world_pos = pca.inverse_transform(pose_p.reshape(1, -1)).reshape(N, 3)
+                world_poses.append(world_pos.astype(np.float32))
+
+        return world_poses, result.trajectory
 
 
 # ---------------------------------------------------------------------------
@@ -293,32 +448,43 @@ class ThumbnailRenderer:
     @staticmethod
     def render_cfd(graph, cx: float = None, cy: float = None,
                    r: float = None) -> bytes:
-        """Render CFD mesh with node-type colour coding."""
+        """Render CFD mesh with triangulated edges and node-type colour coding."""
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import matplotlib.tri as tri
+        import matplotlib.tri as mtri
+        from scipy.spatial import Delaunay
 
         from utils.utils import NodeType
 
-        pos = graph.pos.numpy()
+        pos = graph.pos.numpy()    # [N, 2]
         x   = graph.x.numpy()
         nt  = x[:, 0].astype(int)
 
-        # Colour map per node type
-        colours = np.where(nt == int(NodeType.NORMAL),       0,
-                  np.where(nt == int(NodeType.WALL_BOUNDARY), 1,
-                  np.where(nt == int(NodeType.INFLOW),        2,
-                  np.where(nt == int(NodeType.OUTFLOW),       3, 0))))
-        cmap = plt.cm.get_cmap("tab10")
+        # Re-triangulate from pos (face was consumed by FaceToEdge transform)
+        tri  = Delaunay(pos)
+        face = tri.simplices         # [F, 3]
+
+        # Colour per node type
+        colour_map = {
+            int(NodeType.NORMAL):        "#4f8ef7",
+            int(NodeType.WALL_BOUNDARY): "#e05c5c",
+            int(NodeType.INFLOW):        "#50c878",
+            int(NodeType.OUTFLOW):       "#f0a500",
+        }
+        node_colours = [colour_map.get(n, "#888888") for n in nt]
+
+        triang = mtri.Triangulation(pos[:, 0], pos[:, 1], face)
 
         fig, ax = plt.subplots(figsize=(4, 2.4), dpi=100)
-        ax.scatter(pos[:, 0], pos[:, 1], c=colours, cmap=cmap,
-                   s=2, vmin=0, vmax=9)
+        ax.set_facecolor("#0f172a")
+        fig.patch.set_facecolor("#0f172a")
+
+        ax.triplot(triang, color="#334155", linewidth=0.3, alpha=0.7)
+        ax.scatter(pos[:, 0], pos[:, 1], c=node_colours, s=3, zorder=2)
+
         ax.set_aspect("equal")
         ax.axis("off")
-        ax.set_facecolor("#1a1a2e")
-        fig.patch.set_facecolor("#1a1a2e")
 
         buf = io.BytesIO()
         plt.savefig(buf, format="png", bbox_inches="tight",
@@ -392,20 +558,25 @@ async def generate(req: GenerateRequest):
 
             # Run sampler in thread pool so it doesn't block the event loop
             loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(
+            results, trajectory = await loop.run_in_executor(
                 None,
                 lambda: sampler.sample(req.target_value,
                                        req.n_candidates,
-                                       req.device)
+                                       req.device,
+                                       req.method)
             )
 
-            # Store thumbnails and yield events
+            # Stream optimisation trajectory first (gradient mode only)
+            if trajectory:
+                yield _sse_event("trajectory", {"values": trajectory})
+                await asyncio.sleep(0)
+
+            # Store thumbnails and yield candidate events
             _thumbnail_cache[session_id] = {}
             best_id  = 0
             best_err = float("inf")
 
             for c, graph in results:
-                # Render thumbnail
                 try:
                     if req.domain == "cylinder_flow":
                         png = ThumbnailRenderer.render_cfd(graph)
@@ -416,7 +587,7 @@ async def generate(req: GenerateRequest):
                 except Exception:
                     thumbnail_url = None
 
-                payload        = asdict(c)
+                payload                  = asdict(c)
                 payload["thumbnail_url"] = thumbnail_url
                 payload["session_id"]    = session_id
 
@@ -426,10 +597,9 @@ async def generate(req: GenerateRequest):
                     best_id  = c.id
 
                 yield _sse_event("candidate", payload)
-                await asyncio.sleep(0)   # yield to event loop
+                await asyncio.sleep(0)
 
-            yield _sse_event("done", {"best_id": best_id,
-                                       "session_id": session_id})
+            yield _sse_event("done", {"best_id": best_id, "session_id": session_id})
 
         except HTTPException as e:
             yield _sse_event("error", {"detail": e.detail})

@@ -119,6 +119,8 @@ export const Generate: React.FC = () => {
             const payload = JSON.parse(dataLine);
             if (eventLine === 'candidate') {
               setCandidates(prev => [...prev, payload as Candidate]);
+            } else if (eventLine === 'trajectory') {
+              setOptTrajectory(payload.values ?? []);
             } else if (eventLine === 'done') {
               setBestId(payload.best_id ?? null);
             } else if (eventLine === 'error') {
@@ -238,7 +240,7 @@ export const Generate: React.FC = () => {
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
             >
               <option value="sample">CVAE Sample</option>
-              <option value="gradient">Gradient Descent (Phase 4)</option>
+              <option value="gradient">Gradient Descent</option>
             </select>
           </div>
         </div>
@@ -328,7 +330,7 @@ export const Generate: React.FC = () => {
         </div>
       )}
 
-      {/* Optimisation trajectory (Phase 4 gradient method) */}
+      {/* Optimisation trajectory (gradient descent method) */}
       {optTrajectory.length > 0 && (
         <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4">
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
@@ -367,12 +369,14 @@ export const Generate: React.FC = () => {
                 <div className="text-[11px] text-slate-500 uppercase tracking-wider">Confidence</div>
                 <div className={cn(
                   "font-mono text-lg",
-                  c.is_ood ? "text-amber-400" : "text-emerald-400"
+                  c.ood_confidence < 0 ? "text-slate-500" : c.is_ood ? "text-amber-400" : "text-emerald-400"
                 )}>
-                  {(c.ood_confidence * 100).toFixed(1)}%
+                  {c.ood_confidence < 0 ? 'N/A' : `${(c.ood_confidence * 100).toFixed(1)}%`}
                 </div>
                 <div className="text-xs text-slate-400">
-                  {c.is_ood ? '⚠ Out of distribution' : '✓ In distribution'}
+                  {c.ood_confidence < 0
+                    ? 'Train model to enable OOD scoring'
+                    : c.is_ood ? '⚠ Out of distribution' : '✓ In distribution'}
                 </div>
               </div>
               <div className="space-y-1">

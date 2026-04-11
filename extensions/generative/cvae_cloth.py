@@ -68,6 +68,10 @@ class ClothCVAEConfig:
     epochs:      int   = 300
     batch_size:  int   = 64
     val_split:   float = 0.1
+    # Free-bits threshold: KL per latent dim is clamped to at least this value.
+    # Prevents posterior collapse on unused dimensions.
+    # 0.0 = disabled (standard KL); recommended value: 0.05
+    free_bits:   float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +300,18 @@ class ClothCVAETrainer:
         self._device          = device
         self._scaler          = ClothCVAEScaler()
 
-    @staticmethod
-    def _kl_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        return -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    def _kl_loss(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """
+        KL divergence with free-bits per latent dimension.
+
+        See CVAETrainer._kl_loss for full description.
+        When free_bits=0.0 this is identical to the standard formula.
+        """
+        free_bits = self._cfg.free_bits
+        if free_bits <= 0.0:
+            return -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        kl_per_dim = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp(), dim=0)
+        return torch.sum(torch.clamp(kl_per_dim, min=free_bits))
 
     def _physics_loss(self, recon_norm: torch.Tensor,
                       target_stress_norm: torch.Tensor) -> torch.Tensor:
@@ -349,8 +362,11 @@ class ClothCVAETrainer:
                 recon, mu, lv = self._model(p_b, s_b, s_b)
                 rl = F.mse_loss(recon, p_b)
                 kl = self._kl_loss(mu, lv)
-                ph = self._physics_loss(recon, s_b)
-                ls = cfg.alpha * rl + cfg.beta * kl + cfg.lam * ph
+                if cfg.lam > 0.0:
+                    ph = self._physics_loss(recon, s_b)
+                    ls = cfg.alpha * rl + cfg.beta * kl + cfg.lam * ph
+                else:
+                    ls = cfg.alpha * rl + cfg.beta * kl
 
                 optim.zero_grad()
                 ls.backward()

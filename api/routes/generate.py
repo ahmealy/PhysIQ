@@ -40,7 +40,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from api.state import DOMAINS
+from api.state import DOMAINS, get_gnn_scorer
 
 router = APIRouter()
 
@@ -132,7 +132,43 @@ class CFDDesignSampler(BaseDesignSampler):
     SURROGATE_PATH = "checkpoints/drag_surrogate.pth"
 
     def sample(self, target: float, n: int, device: str,
-               method: str = "sample") -> tuple[list, list]:
+               method: str = "sample", mode: str = "quick") -> tuple[list, list]:
+        """
+        Generate n candidates. mode='quick' uses MLP surrogate only.
+        mode='deep' adds GNN adaptive rollout scoring after sampling.
+        """
+        results, trajectory = self._quick_sample(target, n, device, method)
+
+        if mode == "deep":
+            cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
+            if not os.path.exists(cfd_ckpt):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Deep mode requested but GNN checkpoint not found at %s. "
+                    "Returning quick-mode results.", cfd_ckpt
+                )
+                return results, trajectory
+
+            scorer = get_gnn_scorer(cfd_ckpt, device=device)
+            graphs = [g for _, g in results]
+            gnn_scores = scorer.score_candidates(graphs, device=device)
+
+            import math
+            updated = []
+            for (c, g), score in zip(results, gnn_scores):
+                if math.isnan(score.gnn_predicted_value):
+                    c.gnn_failed = True
+                else:
+                    c.gnn_predicted_value = score.gnn_predicted_value
+                    c.score_gap           = abs(c.predicted_value - score.gnn_predicted_value)
+                    c.gnn_converged       = score.converged
+                updated.append((c, g))
+            results = updated
+
+        return results, trajectory
+
+    def _quick_sample(self, target: float, n: int, device: str,
+                      method: str = "sample") -> tuple[list, list]:
         import torch
         import torch.nn.functional as F
         from extensions.generative.cvae_cfd import CVAETrainer
@@ -598,12 +634,20 @@ async def generate(req: GenerateRequest):
                 lambda: sampler.sample(req.target_value,
                                        req.n_candidates,
                                        req.device,
-                                       req.method)
+                                       req.method,
+                                       req.mode)
             )
 
             # Stream optimisation trajectory first (gradient mode only)
             if trajectory:
                 yield _sse_event("trajectory", {"values": trajectory})
+                await asyncio.sleep(0)
+
+            # Warn if deep mode was requested but fell back to quick (e.g. missing checkpoint)
+            if req.mode == "deep" and all(c.gnn_predicted_value is None for c, _ in results):
+                yield _sse_event("warning", {
+                    "detail": "GNN checkpoint not found — results are surrogate-only (quick mode)."
+                })
                 await asyncio.sleep(0)
 
             # Store thumbnails and yield candidate events

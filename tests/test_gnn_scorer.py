@@ -96,3 +96,65 @@ def test_get_gnn_scorer_returns_cached_instance():
 
         assert s1 is s2
         assert MockClass.call_count == 1  # constructed only once
+
+
+def test_cfd_sampler_calls_gnn_scorer_in_deep_mode():
+    """CFDDesignSampler.sample() calls GnnScorer when mode='deep'."""
+    from unittest.mock import patch, MagicMock
+    from api.routes.generate import CFDDesignSampler, CandidateResult
+    from extensions.generative.gnn_scorer import GnnScore
+
+    sampler = CFDDesignSampler()
+
+    fake_candidate = CandidateResult(
+        id=0, domain="cylinder_flow",
+        predicted_value=0.03, target_value=0.025,
+        ood_confidence=-1.0, is_ood=False,
+        mesh_nodes=100, params={"cx":0.5,"cy":0.2,"r":0.05,"v_inlet":1.0},
+    )
+    fake_graph = MagicMock()
+    fake_score = GnnScore(gnn_predicted_value=0.028, converged=True)
+
+    with patch.object(sampler, '_quick_sample', return_value=([(fake_candidate, fake_graph)], [])):
+        with patch('api.routes.generate.get_gnn_scorer') as mock_get_scorer:
+            with patch('api.routes.generate.os.path.exists', return_value=True):
+                mock_scorer = MagicMock()
+                mock_scorer.score_candidates.return_value = [fake_score]
+                mock_get_scorer.return_value = mock_scorer
+
+                results, traj = sampler.sample(
+                    target=0.025, n=1, device="cpu", method="sample", mode="deep"
+                )
+
+    mock_scorer.score_candidates.assert_called_once()
+    c = results[0][0]
+    assert c.gnn_predicted_value == pytest.approx(0.028)
+    assert c.score_gap            == pytest.approx(abs(0.03 - 0.028))
+    assert c.gnn_converged        is True
+    assert c.gnn_failed           is False
+
+
+def test_cfd_sampler_skips_gnn_scorer_in_quick_mode():
+    """CFDDesignSampler.sample() does NOT call GnnScorer when mode='quick'."""
+    from unittest.mock import patch, MagicMock
+    from api.routes.generate import CFDDesignSampler, CandidateResult
+
+    sampler = CFDDesignSampler()
+    fake_candidate = CandidateResult(
+        id=0, domain="cylinder_flow",
+        predicted_value=0.03, target_value=0.025,
+        ood_confidence=-1.0, is_ood=False,
+        mesh_nodes=100, params={"cx":0.5,"cy":0.2,"r":0.05,"v_inlet":1.0},
+    )
+    fake_graph = MagicMock()
+
+    with patch.object(sampler, '_quick_sample', return_value=([(fake_candidate, fake_graph)], [])):
+        with patch('api.routes.generate.get_gnn_scorer') as mock_get_scorer:
+            results, traj = sampler.sample(
+                target=0.025, n=1, device="cpu", method="sample", mode="quick"
+            )
+
+    mock_get_scorer.assert_not_called()
+    c = results[0][0]
+    assert c.gnn_predicted_value is None
+    assert c.score_gap           is None

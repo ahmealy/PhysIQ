@@ -75,3 +75,24 @@ def test_candidate_result_has_gnn_fields():
     assert c.score_gap           is None
     assert c.gnn_converged       is None
     assert c.gnn_failed          is False
+
+
+def test_get_gnn_scorer_returns_cached_instance():
+    """get_gnn_scorer returns the same object on repeated calls (cached)."""
+    import importlib
+    import api.state as state_module
+
+    # Clear cache before test
+    from api.state import clear_gnn_scorer_cache
+    clear_gnn_scorer_cache()
+
+    from unittest.mock import patch, MagicMock
+    mock_scorer = MagicMock()
+
+    with patch('api.state.GnnScorer', return_value=mock_scorer) as MockClass:
+        from api.state import get_gnn_scorer
+        s1 = get_gnn_scorer("checkpoints/best_model.pth", "cpu")
+        s2 = get_gnn_scorer("checkpoints/best_model.pth", "cpu")
+
+        assert s1 is s2
+        assert MockClass.call_count == 1  # constructed only once

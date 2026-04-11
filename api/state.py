@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Optional
 import torch
+from extensions.generative.gnn_scorer import GnnScorer
 
 # ── Training state ────────────────────────────────────────────────────────────
 train_process: Optional[subprocess.Popen] = None
@@ -150,6 +151,27 @@ def get_model(checkpoint_path: str, device: str):
 def clear_model_cache():
     """Force reload on next get_model() call (e.g. after training completes)."""
     _model_cache.clear()
+
+
+# ── GnnScorer cache (Deep mode) ────────────────────────────────────────────
+_gnn_scorer_cache: dict[tuple, "GnnScorer"] = {}
+_gnn_scorer_lock  = threading.Lock()
+
+
+def get_gnn_scorer(checkpoint_path: str, device: str) -> "GnnScorer":
+    """Lazy-load and cache a GnnScorer. Thread-safe double-checked locking."""
+    key = (checkpoint_path, device)
+    if key in _gnn_scorer_cache:
+        return _gnn_scorer_cache[key]
+    with _gnn_scorer_lock:
+        if key not in _gnn_scorer_cache:
+            _gnn_scorer_cache[key] = GnnScorer(checkpoint_path, device=device)
+    return _gnn_scorer_cache[key]
+
+
+def clear_gnn_scorer_cache() -> None:
+    """Clear the GnnScorer cache (used in tests)."""
+    _gnn_scorer_cache.clear()
 
 
 # ── Domain registry ───────────────────────────────────────────────────────────

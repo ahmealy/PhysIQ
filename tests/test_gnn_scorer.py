@@ -51,3 +51,27 @@ def test_gnn_scorer_score_candidates_returns_one_per_graph():
     assert len(results) == 3
     assert all(isinstance(r, GnnScore) for r in results)
     assert all(r.gnn_predicted_value == 0.3 for r in results)
+
+
+def test_generate_request_has_mode_field():
+    """GenerateRequest accepts mode='quick' and mode='deep'."""
+    from api.routes.generate import GenerateRequest
+    req_quick = GenerateRequest(mode="quick")
+    req_deep  = GenerateRequest(mode="deep")
+    assert req_quick.mode == "quick"
+    assert req_deep.mode  == "deep"
+
+
+def test_candidate_result_has_gnn_fields():
+    """CandidateResult has the 4 new optional GNN fields defaulting to None/False."""
+    from api.routes.generate import CandidateResult
+    c = CandidateResult(
+        id=0, domain="cylinder_flow",
+        predicted_value=0.03, target_value=0.025,
+        ood_confidence=-1.0, is_ood=False,
+        mesh_nodes=100, params={},
+    )
+    assert c.gnn_predicted_value is None
+    assert c.score_gap           is None
+    assert c.gnn_converged       is None
+    assert c.gnn_failed          is False

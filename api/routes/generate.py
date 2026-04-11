@@ -72,6 +72,7 @@ class GenerateRequest(BaseModel):
     n_candidates:     int   = 5
     method:           str   = "sample"  # "sample" | "gradient"
     device:           str   = "cpu"
+    mode:             str   = "quick"   # "quick" | "deep"
 
 
 # ---------------------------------------------------------------------------
@@ -81,14 +82,19 @@ class GenerateRequest(BaseModel):
 @dataclass
 class CandidateResult:
     """One generated design candidate."""
-    id:              int
-    domain:          str
-    predicted_value: float    # drag (CFD) or stress (cloth)
-    target_value:    float
-    ood_confidence:  float    # 1.0 = in-distribution
-    is_ood:          bool
-    mesh_nodes:      int
-    params:          dict     # domain-specific params
+    id:                   int
+    domain:               str
+    predicted_value:      float    # drag (CFD) or stress (cloth) from MLP surrogate
+    target_value:         float
+    ood_confidence:       float    # 1.0 = in-distribution; -1.0 = unavailable
+    is_ood:               bool
+    mesh_nodes:           int
+    params:               dict     # domain-specific params
+    # Deep mode fields — all None/False in quick mode
+    gnn_predicted_value:  float | None = None
+    score_gap:            float | None = None   # |surrogate - gnn|
+    gnn_converged:        bool  | None = None   # False if 200-step cap hit
+    gnn_failed:           bool         = False  # True if rollout threw
 
 
 # ---------------------------------------------------------------------------

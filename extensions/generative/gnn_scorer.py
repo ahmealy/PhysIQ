@@ -70,8 +70,13 @@ class GnnScorer:
         Each graph is scored independently. If a graph raises during rollout
         it gets GnnScore(gnn_predicted_value=float('nan'), converged=False)
         so callers can detect failure via math.isnan().
+
+        NOTE: GnnScorer is not safe to use concurrently with training — eval()
+        mode is set here once for the whole batch rather than per-candidate.
         """
-        import math
+        # Set eval mode once per batch, not once per candidate.
+        self.simulator.eval()
+
         dev = device or self.device
         results: list[GnnScore] = []
 
@@ -96,20 +101,37 @@ class GnnScorer:
         """
         from utils.utils import NodeType
 
-        self.simulator.eval()
+        # simulator.eval() is called once per batch in score_candidates(), not here.
 
         graph = graph.clone()
         if graph.edge_index is None:
             graph = self.transformer(graph)
+
+        # Bug 3: validate that the transform actually produced connectivity.
+        if graph.edge_index is None and graph.face is None:
+            raise ValueError(
+                "_adaptive_rollout: graph has no edge_index and no face after "
+                "transform — cannot run rollout. Supply a graph with pre-built "
+                "edges or a face tensor so FaceToEdge can construct them."
+            )
+
         graph = graph.to(device)
 
         # Extract node_type from x[:,0]
         node_type = graph.x[:, 0].long()   # [N]
 
-        # Boundary mask — wall + inflow nodes are pinned every step
-        fluid_mask    = (node_type == int(NodeType.NORMAL)) | \
+        # evolving_mask: NORMAL and OUTFLOW nodes whose velocity is predicted
+        # each step. boundary_mask pins all non-fluid-dynamic nodes
+        # (OBSTACLE, WALL_BOUNDARY, INFLOW, AIRFOIL, HANDLE, …) to their
+        # original values so they are never overwritten by the simulator output.
+        evolving_mask = (node_type == int(NodeType.NORMAL)) | \
                         (node_type == int(NodeType.OUTFLOW))
-        boundary_mask = ~fluid_mask        # [N] bool
+        boundary_mask = ~evolving_mask     # [N] bool
+
+        # Save the full x layout once — Simulator.forward() overwrites graph.x
+        # in-place with normalized features, so we must restore the original
+        # [node_type | vel_x | vel_y | …] schema before every forward call.
+        original_x = graph.x.clone()      # shape [N, F]
 
         # Current velocity — columns 1:3 of x (cylinder_flow schema)
         current_vel = graph.x[:, 1:3].clone()   # [N, 2]
@@ -124,7 +146,11 @@ class GnnScorer:
                 chunk_end = min(total_steps + _CHUNK, _MAX_STEPS)
 
                 for _ in range(chunk_end - total_steps):
-                    # Swap in current prediction as next input
+                    # Restore the original x layout, then inject current velocity.
+                    # This is necessary because Simulator.forward() mutates
+                    # graph.x to hold normalized features; without this restore
+                    # the next write would corrupt the wrong tensor columns.
+                    graph.x = original_x.clone()
                     graph.x[:, 1:3] = current_vel
 
                     next_vel = self.simulator(graph, velocity_sequence_noise=None)  # [N,2]

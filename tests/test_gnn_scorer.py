@@ -40,6 +40,7 @@ def test_gnn_scorer_score_candidates_returns_one_per_graph():
 
     scorer = GnnScorer.__new__(GnnScorer)
     scorer.device = "cpu"
+    scorer.simulator = MagicMock()   # score_candidates() calls simulator.eval() once per batch
 
     fake_score = GnnScore(gnn_predicted_value=0.3, converged=True)
     graphs = [MagicMock(), MagicMock(), MagicMock()]

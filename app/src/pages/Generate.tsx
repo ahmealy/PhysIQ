@@ -8,24 +8,30 @@ import { cn } from '@/src/lib/utils';
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface Candidate {
-  id: number;
-  domain: string;
-  predicted_value: number;
-  target_value: number;
-  ood_confidence: number;
-  is_ood: boolean;
-  mesh_nodes: number;
-  params: Record<string, number>;
-  thumbnail_url?: string | null;
-  session_id?: string;
+  id:                   number;
+  domain:               string;
+  predicted_value:      number;
+  target_value:         number;
+  ood_confidence:       number;
+  is_ood:               boolean;
+  mesh_nodes:           number;
+  params:               Record<string, number>;
+  thumbnail_url?:       string | null;
+  session_id?:          string;
+  // Deep mode fields
+  gnn_predicted_value?: number | null;
+  score_gap?:           number | null;
+  gnn_converged?:       boolean | null;
+  gnn_failed?:          boolean;
 }
 
 interface GenerateConfig {
-  domain: string;
+  domain:       string;
   target_value: number;
   n_candidates: number;
-  method: string;
-  device: string;
+  method:       string;
+  device:       string;
+  mode:         'quick' | 'deep';
 }
 
 // ── Domain metadata ──────────────────────────────────────────────────────────
@@ -60,11 +66,13 @@ export const Generate: React.FC = () => {
     n_candidates: 6,
     method:       'sample',
     device:       'cpu',
+    mode:         'quick',
   });
   const [isGenerating, setIsGenerating] = useState(false);
   const [candidates, setCandidates]     = useState<Candidate[]>([]);
   const [selectedId, setSelectedId]     = useState<number | null>(null);
   const [error, setError]               = useState<string | null>(null);
+  const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [bestId, setBestId]             = useState<number | null>(null);
   const [optTrajectory, setOptTrajectory] = useState<number[]>([]);
 
@@ -80,6 +88,7 @@ export const Generate: React.FC = () => {
     setSelectedId(null);
     setBestId(null);
     setError(null);
+    setWarningMessage(null);
     setOptTrajectory([]);
 
     const ctrl = new AbortController();
@@ -125,6 +134,8 @@ export const Generate: React.FC = () => {
               setBestId(payload.best_id ?? null);
             } else if (eventLine === 'error') {
               setError(payload.detail ?? 'Unknown error');
+            } else if (eventLine === 'warning') {
+              setWarningMessage((payload as any).detail as string);
             }
           } catch { /* ignore parse errors */ }
         }
@@ -251,6 +262,41 @@ export const Generate: React.FC = () => {
           <span>{domCfg.description}</span>
         </div>
 
+        {/* Evaluation Mode Toggle */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-slate-400 mb-2">
+            Evaluation Mode
+          </label>
+          <div className="flex rounded-lg overflow-hidden border border-slate-700">
+            <button
+              type="button"
+              onClick={() => setConfig(c => ({ ...c, mode: 'quick' }))}
+              className={cn(
+                'flex-1 px-4 py-2 text-sm font-medium transition-colors',
+                config.mode === 'quick'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+              )}
+            >
+              ⚡ Quick
+              <span className="block text-xs font-normal opacity-75">Surrogate ~2s</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfig(c => ({ ...c, mode: 'deep' }))}
+              className={cn(
+                'flex-1 px-4 py-2 text-sm font-medium transition-colors',
+                config.mode === 'deep'
+                  ? 'bg-violet-600 text-white'
+                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+              )}
+            >
+              🔬 Deep
+              <span className="block text-xs font-normal opacity-75">GNN rollout ~30s</span>
+            </button>
+          </div>
+        </div>
+
         {/* Generate button */}
         <div className="flex items-center gap-3">
           {!isGenerating ? (
@@ -291,6 +337,15 @@ export const Generate: React.FC = () => {
         </div>
       )}
 
+      {/* Warning */}
+      {warningMessage && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-yellow-500/30
+                        bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{warningMessage}</span>
+        </div>
+      )}
+
       {/* Results grid */}
       {candidates.length > 0 && (
         <div className="space-y-4">
@@ -326,6 +381,11 @@ export const Generate: React.FC = () => {
                 thumbnailUrl={c.thumbnail_url}
                 isSelected={selectedId === c.id || bestId === c.id}
                 onSelect={() => setSelectedId(c.id)}
+                mode={config.mode}
+                gnnPredictedValue={c.gnn_predicted_value}
+                scoreGap={c.score_gap}
+                gnnConverged={c.gnn_converged}
+                gnnFailed={c.gnn_failed}
               />
             ))}
           </div>

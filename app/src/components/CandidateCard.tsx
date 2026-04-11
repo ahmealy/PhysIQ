@@ -14,6 +14,12 @@ interface CandidateCardProps {
   thumbnailUrl?: string | null;
   isSelected?: boolean;
   onSelect?: () => void;
+  // Deep mode props
+  mode?: 'quick' | 'deep';
+  gnnPredictedValue?: number | null;
+  scoreGap?: number | null;
+  gnnConverged?: boolean | null;
+  gnnFailed?: boolean;
 }
 
 /**
@@ -37,6 +43,11 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
   thumbnailUrl,
   isSelected = false,
   onSelect,
+  mode: _mode,
+  gnnPredictedValue: _gnnPredictedValue,
+  scoreGap: _scoreGap,
+  gnnConverged: _gnnConverged,
+  gnnFailed: _gnnFailed,
 }) => {
   const pctError = targetValue !== 0
     ? ((Math.abs(predictedValue - targetValue) / Math.abs(targetValue)) * 100).toFixed(1)

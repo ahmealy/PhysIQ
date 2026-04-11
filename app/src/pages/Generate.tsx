@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { Sparkles, Play, Square, AlertCircle, Info } from 'lucide-react';
+import { Sparkles, Square, AlertCircle, Info } from 'lucide-react';
 import { CandidateCard } from '../components/CandidateCard';
 import { OptimizationChart } from '../components/OptimizationChart';
 import { PipelineSteps } from '../components/PipelineSteps';
@@ -222,10 +222,10 @@ export const Generate: React.FC = () => {
             <input
               type="number"
               min={1}
-              max={20}
+              max={50}
               value={config.n_candidates}
               onChange={e => setConfig(c => ({
-                ...c, n_candidates: Math.max(1, Math.min(20, parseInt(e.target.value) || 1))
+                ...c, n_candidates: Math.max(1, Math.min(50, parseInt(e.target.value) || 1))
               }))}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
             />
@@ -304,8 +304,10 @@ export const Generate: React.FC = () => {
               )}
             </h2>
             <span className="text-xs text-slate-500">
-              {candidates.length} generated ·
-              {' '}{candidates.filter(c => !c.is_ood).length} in-distribution
+              {candidates.length} generated
+              {candidates.some(c => c.ood_confidence >= 0) && (
+                <> · {candidates.filter(c => !c.is_ood && c.ood_confidence >= 0).length} in-distribution</>
+              )}
             </span>
           </div>
 

@@ -21,7 +21,7 @@ Loss:
 
 Design notes
 ------------
-- CVAE uses the same abstract interfaces as cfae_cfd.py.
+- CVAE uses the same abstract interfaces as cvae_cfd.py.
 - The stress surrogate is a small MLP trained on (pose_pca → stress).
 - Differentiable inverse design (Phase 4) operates in this latent space:
   ∂stress/∂z is well-defined through the decoder.
@@ -272,10 +272,10 @@ class ClothCVAEScaler:
         return (s - self.stress_min) / (self.stress_max - self.stress_min + 1e-8)
 
     def denorm_pose(self, p: np.ndarray) -> np.ndarray:
-        return p * (self.pose_max - self.pose_min) + self.pose_min
+        return p * (self.pose_max - self.pose_min + 1e-8) + self.pose_min
 
     def denorm_stress(self, s: np.ndarray) -> np.ndarray:
-        return s * (self.stress_max - self.stress_min) + self.stress_min
+        return s * (self.stress_max - self.stress_min + 1e-8) + self.stress_min
 
 
 # ---------------------------------------------------------------------------
@@ -315,15 +315,39 @@ class ClothCVAETrainer:
 
     def _physics_loss(self, recon_norm: torch.Tensor,
                       target_stress_norm: torch.Tensor) -> torch.Tensor:
-        recon_np    = recon_norm.detach().cpu().numpy()
-        recon_phys  = self._scaler.denorm_pose(recon_np)
-        pred_stress = self._stress_trainer.predict(recon_phys)
-        pred_norm   = (pred_stress - self._scaler.stress_min) / (
-            self._scaler.stress_max - self._scaler.stress_min + 1e-8
-        )
-        pred_t      = torch.from_numpy(pred_norm.astype(np.float32)).to(self._device)
+        """
+        Physics consistency loss — gradient flows back through the decoder.
+
+        The denorm is expressed as differentiable tensor arithmetic so that
+        autograd can trace gradients from the stress prediction back through
+        recon_norm to the CVAE decoder weights.  The StressSurrogate is called
+        without no_grad so the graph stays connected.
+        """
+        p_min = torch.from_numpy(self._scaler.pose_min.astype(np.float32)).to(self._device)
+        p_max = torch.from_numpy(self._scaler.pose_max.astype(np.float32)).to(self._device)
+        recon_phys = recon_norm * (p_max - p_min) + p_min    # [B, K] grad-enabled
+
+        # Normalise into the surrogate's input scale (uses MinMaxScaler fitted on pose)
+        surr_sc = self._stress_trainer._scaler
+        x_min   = torch.from_numpy(surr_sc.x_min.astype(np.float32)).to(self._device)
+        x_max   = torch.from_numpy(surr_sc.x_max.astype(np.float32)).to(self._device)
+        surr_in = (recon_phys - x_min) / (x_max - x_min + 1e-8)  # [B, K]
+
+        # StressSurrogate forward — in-graph (no no_grad wrapper)
+        self._stress_trainer._model.train(False)
+        stress_n_out = self._stress_trainer._model(surr_in)         # [B]
+
+        # Denorm surrogate output to physical stress
+        y_min = float(surr_sc.y_min)
+        y_max = float(surr_sc.y_max)
+        stress_phys = stress_n_out * (y_max - y_min + 1e-8) + y_min  # [B]
+
+        # Re-normalise back to CVAE stress scale for comparison
+        s_min = float(self._scaler.stress_min)
+        s_max = float(self._scaler.stress_max)
+        pred_norm   = (stress_phys - s_min) / (s_max - s_min + 1e-8)
         target_flat = target_stress_norm.squeeze(-1)
-        return F.mse_loss(pred_t, target_flat)
+        return F.mse_loss(pred_norm, target_flat)
 
     def fit(self, pose_pca: np.ndarray, stress: np.ndarray,
             verbose: bool = True) -> list[float]:
@@ -479,7 +503,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Path to cloth_stress.npy from cloth_extractor.py")
     p.add_argument("--pca",     default="data_flag/train/cloth_pca.pkl",
                    help="Path to cloth_pca.pkl from cloth_extractor.py")
-    p.add_argument("--out",     default="checkpoints/cloth_cvae.pth")
+    p.add_argument("--out",     default="checkpoints/flag-simple_cvae.pth")
     p.add_argument("--epochs",  type=int, default=300)
     p.add_argument("--latent",  type=int, default=16)
     p.add_argument("--hidden",  type=int, default=128)

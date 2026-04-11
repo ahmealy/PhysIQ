@@ -108,13 +108,20 @@ class StressObjective(BaseObjective):
         self._target      = target_stress
         self._mesh_rest   = mesh_rest
         self._normal_mask = normal_mask
+        # Pre-allocate target tensor to avoid repeated allocation in __call__
+        # (device is inferred from mesh_rest; updated lazily if device differs)
+        self._target_tensor = torch.tensor(
+            self._target, dtype=torch.float32, device=mesh_rest.device
+        )
 
     def __call__(self, world_pos: torch.Tensor) -> torch.Tensor:
+        # Move pre-allocated tensor to same device as world_pos if needed
+        if self._target_tensor.device != world_pos.device:
+            self._target_tensor = self._target_tensor.to(world_pos.device)
         disp    = torch.norm(world_pos[self._normal_mask] -
                              self._mesh_rest[self._normal_mask], dim=-1)
         stress  = disp.mean()
-        return F.mse_loss(stress, torch.tensor(self._target,
-                                               device=world_pos.device))
+        return F.mse_loss(stress, self._target_tensor)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +192,7 @@ class ClothInverseDesigner:
 
         # Pre-build PCA inverse transform module
         from extensions.generative.cloth_extractor import PosePCA
-        from torch_geometric.data import Data
+        # (Data is already imported at module level)
 
         # Load PCA from cvae_trainer's config (pose_dim = K)
         pose_dim = cvae_trainer._cfg.pose_dim
@@ -193,6 +200,9 @@ class ClothInverseDesigner:
         # Build differentiable PCA module using trainer's scaler and loaded PCA
         # (PCA is stored alongside the CVAE checkpoint via the extractor)
         self._pca_inv: Optional[TorchPCAInverseTransform] = None
+
+        # Cache for reference trajectory topology (loaded once on first use)
+        self._ref_cache: Optional[dict] = None
 
     def _setup_pca_inv(self, pca) -> None:
         """Initialise differentiable PCA inverse transform."""
@@ -220,12 +230,22 @@ class ClothInverseDesigner:
         return self._pca_inv(pose_phys.squeeze(0))  # [N, 3]
 
     def _build_data_from_pos(self, world_pos: torch.Tensor) -> Data:
-        """Build a FlagSimulator-compatible Data from world_pos (non-differentiable scaffold)."""
+        """Build a FlagSimulator-compatible Data from world_pos (non-differentiable scaffold).
+
+        Reference topology (mesh_pos, node_type, cells) is cached after the first
+        load so disk I/O happens at most once per optimiser instance.
+        """
         from extensions.generative.mesh_generator import ClothMeshBuilder
-        ref = np.load(self._ref_path)
-        mp  = ref["mesh_pos"].astype(np.float32)
-        nt  = ref["node_type"].astype(np.float32)
-        cells = ref["cells"].astype(np.int64)
+        if self._ref_cache is None:
+            ref = np.load(self._ref_path)
+            self._ref_cache = {
+                "mp":    ref["mesh_pos"].astype(np.float32),
+                "nt":    ref["node_type"].astype(np.float32),
+                "cells": ref["cells"].astype(np.int64),
+            }
+        mp    = self._ref_cache["mp"]
+        nt    = self._ref_cache["nt"]
+        cells = self._ref_cache["cells"]
 
         wp_np    = world_pos.detach().cpu().numpy()
         nt_t     = torch.from_numpy(nt).to(self._device)
@@ -310,17 +330,23 @@ class ClothInverseDesigner:
             all_trajectories.append(traj)
             final_loss = traj[-1]
             if final_loss < best_loss:
-                best_loss   = final_loss
-                best_z      = z.detach().cpu().numpy().copy()
-                # Compute stress from best z
-                with torch.no_grad():
-                    wp_best   = self._decode_pose(z.detach(), target_norm)
-                    g_best    = self._build_data_from_pos(wp_best.detach())
-                    np_best   = self._simulator(g_best)
-                    disp      = torch.norm(np_best[self._objective._normal_mask] -
-                                          self._objective._mesh_rest[
-                                              self._objective._normal_mask], dim=-1)
-                    best_stress = float(disp.mean().item())
+                best_loss = final_loss
+                # Snapshot best_z immediately — do NOT reference loop variable z later
+                best_z = z.detach().cpu().numpy().copy()
+
+        # Recompute best_stress from best_z (not from the loop-end z of the last restart)
+        if best_z is not None:
+            best_z_t = torch.from_numpy(best_z).to(self._device)
+            with torch.no_grad():
+                wp_best     = self._decode_pose(best_z_t, target_norm)
+                g_best      = self._build_data_from_pos(wp_best.detach())
+                np_best     = self._simulator(g_best)
+                disp        = torch.norm(
+                    np_best[self._objective._normal_mask] -
+                    self._objective._mesh_rest[self._objective._normal_mask],
+                    dim=-1
+                )
+                best_stress = float(disp.mean().item())
 
         # Use trajectory from best restart
         best_run_idx = min(range(n_restarts),
@@ -366,7 +392,9 @@ def optimize_cloth(cvae_path: str,
         OptimisationResult
     """
     import torch
-    from extensions.generative.cvae_cloth import ClothCVAE, ClothCVAETrainer, StressSurrogate, StressSurrogateTrainer
+    from extensions.generative.cvae_cloth import (
+        ClothCVAETrainer, StressSurrogate, StressSurrogateTrainer
+    )
     from extensions.generative.cloth_extractor import PosePCA
     from model.flag_simulator import FlagSimulator
     from utils.utils import NodeType
@@ -374,23 +402,15 @@ def optimize_cloth(cvae_path: str,
     # Load PCA
     pca = PosePCA.load(pca_path)
 
-    # Load CVAE trainer (model + scaler)
-    ckpt    = torch.load(cvae_path, map_location=device, weights_only=False)
-    cfg     = ckpt["cfg"]
-    model   = ClothCVAE(cfg=cfg)
-    model.load_state_dict(ckpt["model_state_dict"])
-
-    # Dummy stress surrogate (not used for optimisation, only for trainer interface)
-    surrogate = StressSurrogate(pose_dim=cfg.pose_dim)
-    s_trainer = StressSurrogateTrainer(surrogate, device=device)
-
-    from extensions.generative.cvae_cloth import ClothCVAETrainer, ClothCVAEScaler
-    trainer           = ClothCVAETrainer.__new__(ClothCVAETrainer)
-    trainer._model    = model.to(device)
-    trainer._scaler   = ckpt["scaler"]
-    trainer._cfg      = cfg
-    trainer._device   = device
-    trainer._stress_trainer = s_trainer
+    # Load CVAE trainer via the proper classmethod so new checkpoint format
+    # (cfg_dict / scaler_dict) is handled correctly (fixes KeyError on "cfg"/"scaler")
+    _peek    = torch.load(cvae_path, map_location=device, weights_only=False)
+    pose_dim = (_peek.get("cfg_dict") or {}).get("pose_dim", 16)
+    surrogate  = StressSurrogate(pose_dim=pose_dim)
+    s_trainer  = StressSurrogateTrainer(surrogate, device=device)
+    trainer    = ClothCVAETrainer.load(cvae_path,
+                                       stress_trainer=s_trainer,
+                                       device=device)
 
     # Load simulator
     sim_ckpt  = torch.load(simulator_ckpt_path, map_location=device, weights_only=False)

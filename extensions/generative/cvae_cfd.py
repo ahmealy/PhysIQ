@@ -258,7 +258,7 @@ class CVAEScaler:
         return p * (self.param_max - self.param_min) + self.param_min
 
     def denorm_drag(self, d: np.ndarray) -> np.ndarray:
-        return d * (self.drag_max - self.drag_min) + self.drag_min
+        return d * (self.drag_max - self.drag_min + 1e-8) + self.drag_min
 
 
 # ---------------------------------------------------------------------------
@@ -316,19 +316,34 @@ class CVAETrainer:
         ||drag_surrogate(denorm(recon)) - denorm(target_drag)||²
 
         Uses the injected surrogate (Dependency Inversion).
+
+        Gradient flows back through recon_norm so the physics loss actually
+        trains the decoder.  The denorm is expressed as differentiable tensor
+        arithmetic (not numpy) so autograd can trace through it.
         """
-        # Denormalise reconstructed params back to physical units
-        recon_np      = recon_norm.detach().cpu().numpy()
-        recon_phys    = self._scaler.denorm_params(recon_np)
-        # Predict drag for each reconstructed design
-        pred_drag     = self._surrogate.predict(
-            torch.from_numpy(recon_phys.astype(np.float32)).to(self._device)
-        )
-        # Normalise predicted drag
-        pred_norm     = (pred_drag - self._scaler.drag_min) / (
-            self._scaler.drag_max - self._scaler.drag_min + 1e-8
-        )
-        target_flat   = target_drag_norm.squeeze(-1)
+        # Denormalise reconstructed params back to physical units — via tensors
+        # so that gradients flow through recon_norm to the CVAE decoder.
+        p_min = torch.from_numpy(self._scaler.param_min.astype(np.float32)).to(self._device)
+        p_max = torch.from_numpy(self._scaler.param_max.astype(np.float32)).to(self._device)
+        recon_phys = recon_norm * (p_max - p_min) + p_min     # [B, 4] — grad-enabled
+
+        # Normalise into the surrogate's input space
+        x_min  = torch.from_numpy(self._scaler.param_min.astype(np.float32)).to(self._device)
+        x_max  = torch.from_numpy(self._scaler.param_max.astype(np.float32)).to(self._device)
+        surr_in = (recon_phys - x_min) / (x_max - x_min + 1e-8)   # [B, 4]
+
+        # Surrogate forward (kept in-graph — do NOT use .predict() which wraps no_grad)
+        self._surrogate.train(False)
+        drag_n_out = self._surrogate(surr_in)                       # [B]
+
+        # Denorm surrogate output to physical drag
+        y_min = float(self._scaler.drag_min)
+        y_max = float(self._scaler.drag_max)
+        drag_phys = drag_n_out * (y_max - y_min) + y_min            # [B]
+
+        # Re-normalise back to CVAE-scaler drag scale for comparison
+        pred_norm   = (drag_phys - y_min) / (y_max - y_min + 1e-8)
+        target_flat = target_drag_norm.squeeze(-1)
         return F.mse_loss(pred_norm, target_flat)
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -498,7 +513,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"Loading design params from: {args.params}")
     params = np.load(args.params).astype(np.float32)
-    valid  = np.isfinite(params[:, 0])
+    valid  = np.isfinite(params).all(axis=1)   # check all 4 columns, not just col 0
     params = params[valid]
     print(f"Loaded {len(params)} valid param vectors.")
 

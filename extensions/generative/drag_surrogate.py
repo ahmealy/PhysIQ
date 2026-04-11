@@ -161,7 +161,7 @@ class MinMaxScaler:
         return (y - self.y_min) / (self.y_max - self.y_min + 1e-8)
 
     def inverse_y(self, y_norm: np.ndarray) -> np.ndarray:
-        return y_norm * (self.y_max - self.y_min) + self.y_min
+        return y_norm * (self.y_max - self.y_min + 1e-8) + self.y_min
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"Loading design params from: {args.params}")
     params = np.load(args.params)         # [N, 4]
-    valid  = np.isfinite(params[:, 0])
+    valid  = np.isfinite(params).all(axis=1)   # check all 4 columns
     params = params[valid]
     print(f"Loaded {len(params)} valid param vectors.")
 

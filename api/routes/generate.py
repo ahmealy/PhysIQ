@@ -28,7 +28,6 @@ import os
 import sys
 import io
 import uuid
-import base64
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from typing import AsyncGenerator, Optional
@@ -46,7 +45,21 @@ from api.state import DOMAINS
 router = APIRouter()
 
 # In-memory thumbnail cache: session_id → {candidate_id → png_bytes}
+# Bounded at _THUMBNAIL_CACHE_MAX_SESSIONS entries; oldest sessions are evicted.
+_THUMBNAIL_CACHE_MAX_SESSIONS = 100
 _thumbnail_cache: dict[str, dict[int, bytes]] = {}
+_cache_order: list[str] = []  # insertion-order LRU tracker
+
+
+def _cache_session(session_id: str, thumbnails: dict[int, bytes]) -> None:
+    """Insert a session into the thumbnail cache, evicting the oldest if over capacity."""
+    if session_id in _thumbnail_cache:
+        _cache_order.remove(session_id)
+    elif len(_thumbnail_cache) >= _THUMBNAIL_CACHE_MAX_SESSIONS:
+        oldest = _cache_order.pop(0)
+        _thumbnail_cache.pop(oldest, None)
+    _thumbnail_cache[session_id] = thumbnails
+    _cache_order.append(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -338,9 +351,13 @@ class ClothDesignSampler(BaseDesignSampler):
         candidates = []
         for i, wp in enumerate(world_poses):
             graph = builder.build(wp)
+            # Use the stress surrogate to get a predicted stress for this pose.
+            # Recover the normalised PCA coords the trainer would have used:
+            pca_coords = pca.transform(wp.reshape(1, -1))   # [1, K]
+            pred_stress = float(s_trainer.predict(pca_coords.astype(np.float32))[0])
             candidates.append((CandidateResult(
                 id=i, domain="flag_simple",
-                predicted_value=target,     # approx until simulator scoring
+                predicted_value=pred_stress,
                 target_value=target,
                 ood_confidence=-1.0,
                 is_ood=False,
@@ -448,7 +465,12 @@ class ThumbnailRenderer:
     @staticmethod
     def render_cfd(graph, cx: float = None, cy: float = None,
                    r: float = None) -> bytes:
-        """Render CFD mesh with triangulated edges and node-type colour coding."""
+        """Render CFD mesh with triangulated edges and node-type colour coding.
+
+        Triangles whose centroids fall inside the cylinder are filtered out
+        (FaceToEdge consumed the original face; we re-triangulate from pos and
+        then apply the centroid test using the known cx/cy/r).
+        """
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -464,6 +486,13 @@ class ThumbnailRenderer:
         # Re-triangulate from pos (face was consumed by FaceToEdge transform)
         tri  = Delaunay(pos)
         face = tri.simplices         # [F, 3]
+
+        # Filter triangles whose centroid falls inside the cylinder
+        if cx is not None and cy is not None and r is not None:
+            centroids = pos[face].mean(axis=1)    # [F, 2]
+            d_cent    = np.sqrt((centroids[:, 0] - cx) ** 2 +
+                                (centroids[:, 1] - cy) ** 2)
+            face = face[d_cent >= r]
 
         # Colour per node type
         colour_map = {
@@ -572,17 +601,21 @@ async def generate(req: GenerateRequest):
                 await asyncio.sleep(0)
 
             # Store thumbnails and yield candidate events
-            _thumbnail_cache[session_id] = {}
+            session_thumbs: dict[int, bytes] = {}
             best_id  = 0
             best_err = float("inf")
 
             for c, graph in results:
                 try:
                     if req.domain == "cylinder_flow":
-                        png = ThumbnailRenderer.render_cfd(graph)
+                        p = c.params
+                        png = ThumbnailRenderer.render_cfd(
+                            graph,
+                            cx=p.get("cx"), cy=p.get("cy"), r=p.get("r"),
+                        )
                     else:
                         png = ThumbnailRenderer.render_cloth(graph)
-                    _thumbnail_cache[session_id][c.id] = png
+                    session_thumbs[c.id] = png
                     thumbnail_url = f"/api/generate/thumbnail/{session_id}/{c.id}"
                 except Exception:
                     thumbnail_url = None
@@ -599,6 +632,7 @@ async def generate(req: GenerateRequest):
                 yield _sse_event("candidate", payload)
                 await asyncio.sleep(0)
 
+            _cache_session(session_id, session_thumbs)
             yield _sse_event("done", {"best_id": best_id, "session_id": session_id})
 
         except HTTPException as e:

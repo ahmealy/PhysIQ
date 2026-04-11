@@ -40,7 +40,7 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
 }) => {
   const pctError = targetValue !== 0
     ? ((Math.abs(predictedValue - targetValue) / Math.abs(targetValue)) * 100).toFixed(1)
-    : '—';
+    : null;  // null when target is 0 — avoids NaN from parseFloat("—")
 
   const physLabel    = domain === 'cylinder_flow' ? 'Drag proxy' : 'Stress proxy';
   const hasConf      = oodConfidence >= 0;
@@ -50,7 +50,7 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
     <div
       onClick={onSelect}
       className={cn(
-        "rounded-xl border cursor-pointer transition-all duration-200 overflow-hidden",
+        "rounded-xl border transition-all duration-200 overflow-hidden",
         isSelected
           ? "border-blue-500/60 bg-blue-950/30 shadow-lg shadow-blue-900/20"
           : "border-slate-700/50 bg-slate-900/60 hover:border-slate-600",
@@ -103,13 +103,15 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
             </span>
             <span className={cn(
               "ml-2 text-[10px] font-mono",
-              parseFloat(pctError as string) < 10
-                ? "text-emerald-400"
-                : parseFloat(pctError as string) < 25
-                  ? "text-amber-400"
-                  : "text-red-400"
+              pctError === null
+                ? "text-slate-500"
+                : parseFloat(pctError) < 10
+                  ? "text-emerald-400"
+                  : parseFloat(pctError) < 25
+                    ? "text-amber-400"
+                    : "text-red-400"
             )}>
-              {pctError}% err
+              {pctError !== null ? `${pctError}% err` : '—'}
             </span>
           </div>
         </div>

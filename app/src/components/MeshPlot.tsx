@@ -9,6 +9,8 @@ interface MeshPlotProps {
   minVal?: number;
   maxVal?: number;
   colorScale?: (v: number) => string;
+  /** Domain string — used to conditionally render domain-specific overlays. */
+  domain?: string;
 }
 
 export const MeshPlot: React.FC<MeshPlotProps> = ({
@@ -19,6 +21,7 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
   minVal,
   maxVal,
   colorScale: customColorScale,
+  domain,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -42,17 +45,36 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
     canvas.style.height = `${height}px`;
     ctx.scale(dpr, dpr);
 
-    // Domain bounds (x: [0, 1.6], y: [0, 0.4])
-    const xExtent = [0, 1.6];
-    const yExtent = [0, 0.4];
+    // Domain bounds — derive from mesh coordinates so cloth and CFD both render correctly.
+    // For cylinder_flow use fixed [0,1.6]×[0,0.41] so aspect ratio is stable across frames.
+    // For all other domains (cloth, etc.) compute from actual crds extents.
+    let xExtent: [number, number];
+    let yExtent: [number, number];
+
+    if (domain === 'cylinder_flow') {
+      xExtent = [0, 1.6];
+      yExtent = [0, 0.41];
+    } else {
+      const xs = crds.map(c => c[0]);
+      const ys = crds.map(c => c[1]);
+      const xMin = d3.min(xs) ?? 0;
+      const xMax = d3.max(xs) ?? 1;
+      const yMin = d3.min(ys) ?? 0;
+      const yMax = d3.max(ys) ?? 1;
+      // Add 5% padding so the mesh isn't clipped at the edges
+      const xPad = (xMax - xMin) * 0.05 || 0.05;
+      const yPad = (yMax - yMin) * 0.05 || 0.05;
+      xExtent = [xMin - xPad, xMax + xPad];
+      yExtent = [yMin - yPad, yMax + yPad];
+    }
 
     // Padding
     const padding = 20;
     const innerWidth = width - padding * 2;
     const innerHeight = height - padding * 2;
 
-    // Aspect ratio correction (1.6 / 0.4 = 4)
-    const targetAspect = 4;
+    // Aspect ratio correction
+    const targetAspect = (xExtent[1] - xExtent[0]) / (yExtent[1] - yExtent[0]);
     const currentAspect = innerWidth / innerHeight;
 
     let drawWidth = innerWidth;
@@ -98,13 +120,15 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
       ctx.stroke();
     });
 
-    // Draw cylinder obstacle (mocked at x=0.2, y=0.2, r=0.05)
-    ctx.fillStyle = '#1e293b';
-    ctx.beginPath();
-    ctx.arc(xScale(0.2), yScale(0.2), (xScale(0.05) - xScale(0)), 0, Math.PI * 2);
-    ctx.fill();
+    // Draw cylinder obstacle — only for CFD domain (mocked at x=0.2, y=0.2, r=0.05)
+    if (domain === 'cylinder_flow' || domain == null) {
+      ctx.fillStyle = '#1e293b';
+      ctx.beginPath();
+      ctx.arc(xScale(0.2), yScale(0.2), (xScale(0.05) - xScale(0)), 0, Math.PI * 2);
+      ctx.fill();
+    }
 
-  }, [crds, triangles, values, minVal, maxVal, customColorScale]);
+  }, [crds, triangles, values, minVal, maxVal, customColorScale, domain]);
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-900/50 rounded-lg border border-slate-700 overflow-hidden">
@@ -117,3 +141,4 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
     </div>
   );
 };
+

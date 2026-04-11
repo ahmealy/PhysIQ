@@ -455,7 +455,7 @@ export const Generate: React.FC = () => {
                 gnnConverged={c.gnn_converged}
                 gnnFailed={c.gnn_failed}
                 sessionId={c.session_id ?? null}
-                onAnalyze={c.domain === 'cylinder_flow' ? handleAnalyze : undefined}
+                onAnalyze={handleAnalyze}
               />
             ))}
           </div>

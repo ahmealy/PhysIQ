@@ -176,21 +176,24 @@ export const Visualize: React.FC = () => {
           triangles={metadata.triangles}
           values={currentFrame.target_magnitude}
           title={`Ground Truth — ${fieldLabel}`}
+          domain={metadata.domain}
         />
         <MeshPlot
           crds={metadata.crds}
           triangles={metadata.triangles}
           values={currentFrame.predicted_magnitude}
           title={`Prediction — ${fieldLabel}`}
+          domain={metadata.domain}
         />
-        <MeshPlot 
-          crds={metadata.crds} 
-          triangles={metadata.triangles} 
-          values={currentFrame.error} 
+        <MeshPlot
+          crds={metadata.crds}
+          triangles={metadata.triangles}
+          values={currentFrame.error}
           title="Error Magnitude"
           minVal={0}
           maxVal={0.1}
           colorScale={d3.scaleSequential(d3.interpolateReds).domain([0, 0.1])}
+          domain={metadata.domain}
         />
       </div>
 

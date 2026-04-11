@@ -704,6 +704,9 @@ async def generate(req: GenerateRequest):
             # the browser receives the first candidate event.
             _cache_session(session_id, session_thumbs)
             # Also cache graphs for the rollout endpoint.
+            # Tag each graph with its domain so the rollout endpoint can branch correctly.
+            for c, graph in results:
+                graph.domain = c.domain
             _graph_cache[session_id] = {c.id: graph for c, graph in results}
 
             for c, _ in results:
@@ -807,6 +810,7 @@ async def generate_rollout(session_id: str, candidate_id: int,
     save a pkl to result/, and return the filename so the caller can
     open /visualize?file=<filename>.
 
+    Supports both CFD (cylinder_flow) and cloth (flag_simple) domains.
     The graph must be in the in-memory _graph_cache, which is populated
     during the /generate SSE call and lives for the session lifetime
     (up to 100 sessions, LRU-evicted).
@@ -822,69 +826,158 @@ async def generate_rollout(session_id: str, candidate_id: int,
     if graph is None:
         raise HTTPException(status_code=404, detail="Candidate not found in session.")
 
-    from api.state import get_model, DOMAINS
-    cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
-    if not os.path.exists(cfd_ckpt):
-        raise HTTPException(status_code=503,
-                            detail="GNN checkpoint not found — cannot run rollout.")
+    # Determine domain from the cached graph (set during generation)
+    domain = getattr(graph, "domain", "cylinder_flow")
 
+    from api.state import get_model, DOMAINS
     loop = asyncio.get_running_loop()
 
-    def _run_rollout():
-        import torch
-        import torch_geometric.transforms as T
-        from utils.utils import NodeType
+    if domain == "flag_simple":
+        # ── Cloth rollout ──────────────────────────────────────────────────────
+        cloth_ckpt = DOMAINS["flag_simple"]["checkpoint"]
+        if not os.path.exists(cloth_ckpt):
+            raise HTTPException(status_code=503,
+                                detail="Cloth GNN checkpoint not found — cannot run rollout.")
 
-        sim = get_model(cfd_ckpt, device=device)
-        sim.eval()
+        def _run_cloth_rollout():
+            import torch
+            import torch_geometric.transforms as T
+            from model.flag_simulator import FlagSimulator
 
-        g = graph.clone()
-        if g.edge_index is None:
-            transformer = T.Compose([
-                T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)
-            ])
-            g = transformer(g)
-        g = g.to(device)
+            ckpt_data = torch.load(cloth_ckpt, map_location=device, weights_only=False)
+            sim = FlagSimulator(message_passing_num=15, device=device)
+            sd = ckpt_data["model_state_dict"]
+            cur_sd = sim.state_dict()
+            filtered = {k: v for k, v in sd.items()
+                        if k in cur_sd and cur_sd[k].shape == v.shape}
+            sim.load_state_dict(filtered, strict=False)
+            sim.eval()
 
-        node_type    = g.x[:, 0].long()
-        current_vel  = g.x[:, 1:3].clone()
-        original_x   = g.x.clone()
-        boundary_mask = ~((node_type == int(NodeType.NORMAL)) |
-                          (node_type == int(NodeType.OUTFLOW)))
+            g = graph.clone()
+            if g.edge_index is None:
+                transformer = T.Compose([
+                    T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)
+                ])
+                g = transformer(g)
+            g = g.to(device)
 
-        predicted_frames = []
-        with torch.no_grad():
-            for _ in range(n_steps):
-                g.x = original_x.clone()
-                g.x[:, 1:3] = current_vel
-                next_vel = sim(g, velocity_sequence_noise=None)
-                next_vel[boundary_mask] = current_vel[boundary_mask]
-                current_vel = next_vel
-                predicted_frames.append(current_vel.cpu().numpy())   # [N, 2]
+            # Cloth node feature layout: x[:,0:3]=world_pos, x[:,3]=node_type
+            # graph.world_pos and graph.prev_x are set by ClothMeshBuilder
+            if hasattr(g, "world_pos") and g.world_pos is not None:
+                cur_world  = g.world_pos.clone().to(device)   # [N, 3]
+                prev_world = g.prev_x.clone().to(device)      # [N, 3]
+            else:
+                # Fallback: extract world_pos from x columns 0:3
+                cur_world  = g.x[:, :3].clone()
+                prev_world = cur_world.clone()
 
-        import numpy as np
-        predicted_arr = np.stack(predicted_frames)    # [T, N, 2]
-        targets_arr   = predicted_arr.copy()          # no ground truth — use predicted as target
-        crds          = graph.pos.numpy()             # [N, 2]
+            node_type = g.x[:, 3].long()
 
-        os.makedirs("result", exist_ok=True)
-        filename = f"generate_{session_id[:8]}_{candidate_id}.pkl"
-        pkl_path = os.path.join("result", filename)
-        with open(pkl_path, "wb") as f:
-            pickle.dump(
-                [[predicted_arr, targets_arr], crds, {
-                    "domain":           "cylinder_flow",
-                    "target_field":     "velocity",
-                    "confidence_score": None,
-                }],
-                f,
-            )
-        logging.getLogger(__name__).info("Saved generate rollout to %s", pkl_path)
-        return filename
+            predicted_frames = []
+            with torch.no_grad():
+                for _ in range(n_steps):
+                    # Rebuild node features with current positions
+                    g.x = torch.cat([cur_world, node_type.unsqueeze(-1).float()], dim=-1)
+                    g.world_pos = cur_world
+                    g.prev_x    = prev_world
 
-    try:
-        filename = await loop.run_in_executor(None, _run_rollout)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Rollout failed: {exc}")
+                    next_world = sim(g)        # FlagSimulator returns next world_pos [N, 3]
+                    # Note: FlagSimulator.forward() already pins handle/boundary nodes
+                    # internally via Verlet + handle_mask, so no external masking needed.
+
+                    predicted_frames.append(next_world.cpu().numpy())   # [N, 3]
+                    prev_world = cur_world
+                    cur_world  = next_world
+
+            import numpy as np
+            predicted_arr = np.stack(predicted_frames)    # [T, N, 3]
+            targets_arr   = predicted_arr.copy()          # no ground truth — use predicted as target
+
+            # crds = 2D mesh coordinates (UV layout), shape [N, 2]
+            crds = graph.pos.cpu().numpy()                # [N, 2]
+
+            os.makedirs("result", exist_ok=True)
+            filename = f"generate_{session_id[:8]}_{candidate_id}.pkl"
+            pkl_path = os.path.join("result", filename)
+            with open(pkl_path, "wb") as f:
+                pickle.dump(
+                    [[predicted_arr, targets_arr], crds, {
+                        "domain":           "flag_simple",
+                        "target_field":     "world_pos",
+                        "confidence_score": None,
+                    }],
+                    f,
+                )
+            logging.getLogger(__name__).info("Saved cloth generate rollout to %s", pkl_path)
+            return filename
+
+        try:
+            filename = await loop.run_in_executor(None, _run_cloth_rollout)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Cloth rollout failed: {exc}")
+
+    else:
+        # ── CFD rollout (cylinder_flow) ────────────────────────────────────────
+        cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
+        if not os.path.exists(cfd_ckpt):
+            raise HTTPException(status_code=503,
+                                detail="GNN checkpoint not found — cannot run rollout.")
+
+        def _run_cfd_rollout():
+            import torch
+            import torch_geometric.transforms as T
+            from utils.utils import NodeType
+
+            sim = get_model(cfd_ckpt, device=device)
+            sim.eval()
+
+            g = graph.clone()
+            if g.edge_index is None:
+                transformer = T.Compose([
+                    T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)
+                ])
+                g = transformer(g)
+            g = g.to(device)
+
+            node_type     = g.x[:, 0].long()
+            current_vel   = g.x[:, 1:3].clone()
+            original_x    = g.x.clone()
+            boundary_mask = ~((node_type == int(NodeType.NORMAL)) |
+                              (node_type == int(NodeType.OUTFLOW)))
+
+            predicted_frames = []
+            with torch.no_grad():
+                for _ in range(n_steps):
+                    g.x = original_x.clone()
+                    g.x[:, 1:3] = current_vel
+                    next_vel = sim(g, velocity_sequence_noise=None)
+                    next_vel[boundary_mask] = current_vel[boundary_mask]
+                    current_vel = next_vel
+                    predicted_frames.append(current_vel.cpu().numpy())   # [N, 2]
+
+            import numpy as np
+            predicted_arr = np.stack(predicted_frames)    # [T, N, 2]
+            targets_arr   = predicted_arr.copy()          # no ground truth
+            crds          = graph.pos.numpy()             # [N, 2]
+
+            os.makedirs("result", exist_ok=True)
+            filename = f"generate_{session_id[:8]}_{candidate_id}.pkl"
+            pkl_path = os.path.join("result", filename)
+            with open(pkl_path, "wb") as f:
+                pickle.dump(
+                    [[predicted_arr, targets_arr], crds, {
+                        "domain":           "cylinder_flow",
+                        "target_field":     "velocity",
+                        "confidence_score": None,
+                    }],
+                    f,
+                )
+            logging.getLogger(__name__).info("Saved generate rollout to %s", pkl_path)
+            return filename
+
+        try:
+            filename = await loop.run_in_executor(None, _run_cfd_rollout)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Rollout failed: {exc}")
 
     return {"pkl_filename": filename}

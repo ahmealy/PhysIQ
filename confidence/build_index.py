@@ -35,8 +35,12 @@ def main():
     parser.add_argument("--domain",     type=str, default="cylinder_flow",
                         choices=["cylinder_flow", "flag_simple"])
     parser.add_argument("--data_dir",   type=str, default="data")
-    parser.add_argument("--device",     type=str,
+    parser.add_argument("--device",      type=str,
                         default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--max_samples", type=int, default=5000,
+                        help="Randomly subsample this many frames from the dataset. "
+                             "5000 is more than enough for a KD-tree OOD index. "
+                             "Pass -1 to use all samples (may take hours).")
     args = parser.parse_args()
 
     device = args.device
@@ -61,7 +65,23 @@ def main():
             device=device,
         )
 
-    simulator.load_state_dict(ckpt["model_state_dict"])
+    # Load only the keys that match the current model exactly (shape + name).
+    # This handles checkpoints saved with an older/deeper architecture — e.g. a
+    # 4-layer MLP decoder vs the current 3-layer decoder.  The decoder is NOT
+    # used for embeddings (only the encoder and processor are needed), so it is
+    # safe to skip any keys that don't fit.
+    ckpt_sd      = ckpt["model_state_dict"]
+    current_sd   = simulator.state_dict()
+    filtered_sd  = {
+        k: v for k, v in ckpt_sd.items()
+        if k in current_sd and current_sd[k].shape == v.shape
+    }
+    skipped = [k for k in ckpt_sd if k not in filtered_sd]
+    if skipped:
+        print("Warning: skipping %d checkpoint keys with shape/name mismatch "
+              "(decoder not needed for embeddings): %s%s" % (
+                  len(skipped), skipped[:3], " ..." if len(skipped) > 3 else ""))
+    simulator.load_state_dict(filtered_sd, strict=False)
     simulator.eval()
     print("Loaded checkpoint from %s (epoch %d)" % (args.checkpoint, ckpt.get("epoch", 0)))
 
@@ -80,11 +100,21 @@ def main():
         ])
 
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
-    print("Dataset: %d samples. Extracting embeddings..." % len(dataset))
+    n_total = len(dataset)
+
+    # Subsample indices so we don't spend hours on 599k frames.
+    # 5000 representative frames is plenty for a KD-tree OOD index.
+    if args.max_samples > 0 and n_total > args.max_samples:
+        rng     = np.random.default_rng(seed=42)
+        indices = sorted(rng.choice(n_total, size=args.max_samples, replace=False).tolist())
+        print("Dataset: %d samples → subsampling %d for index build." % (n_total, args.max_samples))
+    else:
+        indices = list(range(n_total))
+        print("Dataset: %d samples. Extracting embeddings..." % n_total)
 
     embeddings = []
-    for graph in tqdm(loader, desc="Extracting embeddings"):
-        graph = graph[0] if isinstance(graph, list) else graph  # unbatch single item
+    for i in tqdm(indices, desc="Extracting embeddings"):
+        graph = dataset[i]
         if transformer is not None:
             graph = transformer(graph)
         emb = extract_embedding(simulator, graph, device=device)

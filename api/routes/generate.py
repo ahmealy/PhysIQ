@@ -424,7 +424,13 @@ class ClothDesignSampler(BaseDesignSampler):
         sim_ckpt = DOMAINS["flag_simple"]["checkpoint"]
 
         if not os.path.exists(sim_ckpt):
-            # No simulator available — fall back to sampling
+            # Simulator checkpoint missing — log clearly and fall back to sampling.
+            # Callers should surface this to the user rather than silently substituting.
+            import logging
+            logging.getLogger(__name__).warning(
+                "Cloth gradient descent requested but simulator checkpoint not found at %s. "
+                "Falling back to CVAE sampling (no gradient optimisation).", sim_ckpt
+            )
             world_poses = trainer.generate(target_stress=target, n=n, pca=pca)
             return world_poses, []
 
@@ -536,14 +542,15 @@ class ThumbnailRenderer:
                                 (centroids[:, 1] - cy) ** 2)
             face = face[d_cent >= r]
 
-        # Colour per node type
-        colour_map = {
-            int(NodeType.NORMAL):        "#4f8ef7",
-            int(NodeType.WALL_BOUNDARY): "#e05c5c",
-            int(NodeType.INFLOW):        "#50c878",
-            int(NodeType.OUTFLOW):       "#f0a500",
-        }
-        node_colours = [colour_map.get(n, "#888888") for n in nt]
+        # Use velocity magnitude (first two output dims) for heatmap colouring.
+        # graph.x columns for cylinder_flow: [node_type, vx_t-5..vx_t, vy_t-5..vy_t]
+        # Columns 1–5 = vx history, 6–10 = vy history; use the latest (col 5, 10).
+        if x.shape[1] >= 11:
+            vx = x[:, 5].astype(float)
+            vy = x[:, 10].astype(float)
+            vel_mag = np.sqrt(vx ** 2 + vy ** 2)
+        else:
+            vel_mag = np.zeros(len(pos))
 
         triang = mtri.Triangulation(pos[:, 0], pos[:, 1], face)
 
@@ -551,8 +558,8 @@ class ThumbnailRenderer:
         ax.set_facecolor("#0f172a")
         fig.patch.set_facecolor("#0f172a")
 
-        ax.triplot(triang, color="#334155", linewidth=0.3, alpha=0.7)
-        ax.scatter(pos[:, 0], pos[:, 1], c=node_colours, s=3, zorder=2)
+        # Filled triangle heatmap — matches the Visualize page style
+        ax.tripcolor(triang, vel_mag, cmap="turbo", shading="gouraud")
 
         ax.set_aspect("equal")
         ax.axis("off")
@@ -652,6 +659,7 @@ async def generate(req: GenerateRequest):
 
             # Store thumbnails and yield candidate events
             session_thumbs: dict[int, bytes] = {}
+            thumbnail_urls: dict[int, str | None] = {}
             best_id  = 0
             best_err = float("inf")
 
@@ -666,23 +674,25 @@ async def generate(req: GenerateRequest):
                     else:
                         png = ThumbnailRenderer.render_cloth(graph)
                     session_thumbs[c.id] = png
-                    thumbnail_url = f"/api/generate/thumbnail/{session_id}/{c.id}"
+                    thumbnail_urls[c.id] = f"/api/generate/thumbnail/{session_id}/{c.id}"
                 except Exception:
-                    thumbnail_url = None
-
-                payload                  = asdict(c)
-                payload["thumbnail_url"] = thumbnail_url
-                payload["session_id"]    = session_id
+                    thumbnail_urls[c.id] = None
 
                 err = abs(c.predicted_value - c.target_value)
                 if err < best_err:
                     best_err = err
                     best_id  = c.id
 
+            # Cache all thumbnails before streaming any candidate events so every
+            # thumbnail URL is live by the time the browser receives it.
+            _cache_session(session_id, session_thumbs)
+
+            for c, _ in results:
+                payload                  = asdict(c)
+                payload["thumbnail_url"] = thumbnail_urls[c.id]
+                payload["session_id"]    = session_id
                 yield _sse_event("candidate", payload)
                 await asyncio.sleep(0)
-
-            _cache_session(session_id, session_thumbs)
             yield _sse_event("done", {"best_id": best_id, "session_id": session_id})
 
         except HTTPException as e:

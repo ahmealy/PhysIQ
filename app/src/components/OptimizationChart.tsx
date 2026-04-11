@@ -59,10 +59,10 @@ export const OptimizationChart: React.FC<OptimizationChartProps> = ({
         />
         {targetValue !== undefined && (
           <ReferenceLine
-            y={0}
+            y={targetValue}
             stroke="#6366f1"
             strokeDasharray="4 4"
-            label={{ value: 'Target', fill: '#6366f1', fontSize: 10 }}
+            label={{ value: `Target (${targetValue.toExponential(2)})`, fill: '#6366f1', fontSize: 10 }}
           />
         )}
         <Line

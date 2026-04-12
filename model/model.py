@@ -93,11 +93,18 @@ class TNSBlock(nn.Module):
         self.norm = nn.LayerNorm(hidden_size)
 
     def forward(self, graph: Data) -> Data:
+        if graph.edge_attr is None:
+            raise ValueError(
+                "TNSBlock requires graph.edge_attr (edge features encoded by the Encoder). "
+                "Ensure the graph passed through Encoder before TNSBlock."
+            )
         x_in = graph.x
         x_new = self.conv(graph.x, graph.edge_index, graph.edge_attr)
-        graph.x = x_in + self.norm(x_new)
-        # edge_attr unchanged — TNS does not update edge features per block
-        return graph
+        return Data(
+            x=x_in + self.norm(x_new),
+            edge_attr=graph.edge_attr,
+            edge_index=graph.edge_index,
+        )
 
 
 class SAGEBlock(nn.Module):
@@ -124,14 +131,15 @@ class SAGEBlock(nn.Module):
             bias=True,
         )
         self.norm = nn.LayerNorm(hidden_size)
-        self.act  = nn.ReLU()
 
     def forward(self, graph: Data) -> Data:
         x_in = graph.x
-        x_new = self.act(self.conv(graph.x, graph.edge_index))
-        graph.x = x_in + self.norm(x_new)
-        # edge_attr unchanged
-        return graph
+        x_new = self.conv(graph.x, graph.edge_index)
+        return Data(
+            x=x_in + self.norm(x_new),
+            edge_attr=graph.edge_attr,
+            edge_index=graph.edge_index,
+        )
 
 
 class Decoder(nn.Module):

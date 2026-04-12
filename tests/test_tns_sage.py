@@ -99,3 +99,33 @@ def test_gn_default_unchanged():
     )
     out = m(_graph())
     assert out.shape == (50, 2)
+
+
+def test_tns_backward_pass():
+    """Gradients must flow through TNSBlock to all parameters."""
+    m = EncoderProcesserDecoder(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        architecture="tns", tns_heads=4,
+    )
+    m.train()
+    out = m(_graph())
+    out.sum().backward()
+    for name, p in m.named_parameters():
+        assert p.grad is not None, f"No gradient for {name}"
+
+
+def test_sage_backward_pass():
+    """Gradients must flow through SAGEBlock to all parameters."""
+    m = EncoderProcesserDecoder(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        architecture="sage",
+    )
+    m.train()
+    out = m(_graph())
+    out.sum().backward()
+    for name, p in m.named_parameters():
+        # SAGEBlock does not consume edge_attr in message-passing, so the edge
+        # encoder receives no gradient — this is expected by design.
+        if "eb_encoder" in name:
+            continue
+        assert p.grad is not None, f"No gradient for {name}"

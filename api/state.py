@@ -151,13 +151,17 @@ def get_model(checkpoint_path: str, device: str):
                 from model.simulator import Simulator
                 node_input_size = ckpt.get("node_input_size", 11)
                 edge_input_size = ckpt.get("edge_input_size", 3)
-                target_field = ckpt.get("target_field", "velocity")
+                target_field    = ckpt.get("target_field", "velocity")
+                architecture    = ckpt.get("architecture", "gn")
+                tns_heads       = ckpt.get("tns_heads", 4)
                 sim = Simulator(
                     message_passing_num=15,
                     node_input_size=node_input_size,
                     edge_input_size=edge_input_size,
                     device=device,
                     target_field=target_field,
+                    architecture=architecture,
+                    tns_heads=tns_heads,
                 )
 
             # Filter checkpoint keys to only those that match the current model's

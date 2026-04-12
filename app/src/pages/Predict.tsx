@@ -113,6 +113,25 @@ export const Predict: React.FC = () => {
     return () => clearInterval(t);
   }, [rolloutPhase, rolloutStartMs]);
 
+  // Background status poll while a rollout is running via SSE.
+  // If the SSE stream dies silently (network hiccup), this detects completion
+  // and refreshes the results list so the new pkl appears automatically.
+  useEffect(() => {
+    if (rolloutPhase !== 'running' || reconnectPolling) return; // reconnect has its own poll
+    const poll = setInterval(() => {
+      fetch('/api/rollout/status')
+        .then(r => r.json())
+        .then((rs: any) => {
+          if (!rs.running && rolloutPhase === 'running') {
+            // Server finished but SSE done event was lost — refresh results
+            fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => clearInterval(poll);
+  }, [rolloutPhase, reconnectPolling]);
+
   // Reconnect polling — if backend has a rollout running on page refresh
   useEffect(() => {
     if (!reconnectPolling) return;

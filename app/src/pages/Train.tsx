@@ -33,6 +33,7 @@ export const Train: React.FC = () => {
   const [sageAggr, setSageAggr] = useState<'mean' | 'max' | 'sum'>('mean');
   const [sageNormalize, setSageNormalize] = useState(true);
   const [remoteActive, setRemoteActive] = useState(false);  // true when training is running on remote GPU
+  const [hoveredArch, setHoveredArch] = useState<string | null>(null);
   const [processes, setProcesses] = useState<any[]>([]);
   const [killingPid, setKillingPid] = useState<number | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -406,24 +407,21 @@ export const Train: React.FC = () => {
             </div>
           </section>
 
-          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80">
+          <section className="bg-slate-900/50 border border-slate-800 rounded-2xl">
+            <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80 rounded-t-2xl">
               <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Architecture</h3>
             </div>
             <div className="p-6 space-y-4">
               {/* Architecture picker cards */}
-              <div className="grid grid-cols-3 gap-2">
-                {([
+              {(() => {
+                const ARCHS = [
                   {
                     id: 'GNS',
                     label: 'GNS',
                     sub: 'Graph Network Simulator',
-                    badge: 'DeepMind Default',
-                    badgeColor: 'bg-green-500/15 text-green-400',
                     tooltip: [
-                      '🏆 DeepMind MeshGraphNets default.',
                       '• Sum-aggregation + MLP per message-passing step.',
-                      '• Edge features updated every step.',
+                      '• Edge features updated at every step.',
                       '✅ Best for: cylinder_flow (CFD), any transient mesh sim.',
                       '✅ Fastest to train, most interpretable.',
                       '⚠ Can over-smooth on very large meshes (>50k nodes).',
@@ -433,65 +431,70 @@ export const Train: React.FC = () => {
                     id: 'TNS',
                     label: 'TNS',
                     sub: 'Transformer Neural Sim',
-                    badge: 'Attention-based',
-                    badgeColor: 'bg-purple-500/15 text-purple-400',
                     tooltip: [
-                      '🔮 Multi-head dot-product attention processor.',
+                      '• Multi-head dot-product attention processor.',
                       '• Edge features enter the attention key → geometry-aware.',
                       '• Learned β-gate blends self-transform + attention.',
                       '✅ Best for: global physics coupling (pressure waves, acoustics).',
                       '✅ Better long-range dependencies than GNS.',
-                      '⚠ ~20% slower per epoch; needs heads to divide 128.',
+                      '⚠ ~20% slower per epoch; heads must divide hidden size (128).',
                     ],
                   },
                   {
                     id: 'SAGE',
                     label: 'SAGE',
                     sub: 'GraphSAGE Processor',
-                    badge: 'Scalable',
-                    badgeColor: 'bg-blue-500/15 text-blue-400',
                     tooltip: [
-                      '📐 Mean-aggregation of neighbor node features.',
+                      '• Mean-aggregation of neighbor node features.',
                       '• No edge feature updates → lower memory per step.',
                       '• L2-normalize output reduces over-smoothing.',
-                      '✅ Best for: large meshes (cloth, flag_simple, deformable bodies).',
+                      '✅ Best for: large meshes, cloth (flag_simple), deformable bodies.',
                       '✅ Fastest inference, lowest VRAM.',
-                      '⚠ No edge geometry in message-passing (only encoder).',
+                      '⚠ Edge geometry not used in message-passing (encoder only).',
                     ],
                   },
-                ] as const).map(({ id, label, sub, badge, badgeColor, tooltip }) => (
-                  <div key={id} className="relative group">
-                    <button
-                      onClick={() => !isRunning && setArch(id)}
-                      disabled={isRunning}
-                      className={`w-full text-left p-3 rounded-xl border transition-all ${
-                        arch === id
-                          ? 'border-blue-500/60 bg-blue-500/10'
-                          : 'border-slate-700 bg-slate-950 hover:border-slate-600'
-                      } disabled:opacity-50 disabled:cursor-not-allowed`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className={`text-sm font-bold font-mono ${arch === id ? 'text-blue-300' : 'text-slate-200'}`}>{label}</span>
-                        {arch === id && <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />}
-                      </div>
-                      <p className="text-[9px] text-slate-500 leading-tight mb-1.5">{sub}</p>
-                      <span className={`inline-block text-[8px] font-bold px-1.5 py-0.5 rounded ${badgeColor}`}>{badge}</span>
-                    </button>
-                    {/* Tooltip */}
-                    <div className="pointer-events-none absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                      <div className="bg-slate-950 border border-slate-700 rounded-xl p-3 shadow-2xl">
-                        <p className="text-[10px] font-bold text-white mb-2">{label} — {sub}</p>
-                        <ul className="space-y-1">
-                          {tooltip.map((line, i) => (
-                            <li key={i} className="text-[9px] text-slate-300 leading-snug">{line}</li>
-                          ))}
-                        </ul>
-                      </div>
-                      <div className="w-2 h-2 bg-slate-950 border-b border-r border-slate-700 rotate-45 mx-auto -mt-1" />
+                ] as const;
+                const hovered = ARCHS.find(a => a.id === hoveredArch);
+                return (
+                  <>
+                    <div className="grid grid-cols-3 gap-2">
+                      {ARCHS.map(({ id, label, sub }) => (
+                        <button
+                          key={id}
+                          onClick={() => !isRunning && setArch(id)}
+                          onMouseEnter={() => setHoveredArch(id)}
+                          onMouseLeave={() => setHoveredArch(null)}
+                          disabled={isRunning}
+                          className={`w-full text-left p-3 rounded-xl border transition-all ${
+                            arch === id
+                              ? 'border-blue-500/60 bg-blue-500/10'
+                              : 'border-slate-700 bg-slate-950 hover:border-slate-600'
+                          } disabled:opacity-50 disabled:cursor-not-allowed`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={`text-sm font-bold font-mono ${arch === id ? 'text-blue-300' : 'text-slate-200'}`}>{label}</span>
+                            {arch === id && <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />}
+                          </div>
+                          <p className="text-[9px] text-slate-500 leading-tight">{sub}</p>
+                        </button>
+                      ))}
                     </div>
-                  </div>
-                ))}
-              </div>
+                    {/* Inline tooltip — shown below cards when hovering */}
+                    <div className={`transition-all duration-150 overflow-hidden ${hovered ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
+                      {hovered && (
+                        <div className="bg-slate-950 border border-slate-700 rounded-xl p-3">
+                          <p className="text-[10px] font-bold text-white mb-2">{hovered.label} — {hovered.sub}</p>
+                          <ul className="space-y-1">
+                            {hovered.tooltip.map((line, i) => (
+                              <li key={i} className="text-[9px] text-slate-300 leading-snug">{line}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
 
               {/* TNS hyperparameters */}
               {arch === 'TNS' && (

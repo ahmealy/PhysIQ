@@ -411,16 +411,88 @@ export const Train: React.FC = () => {
               <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Architecture</h3>
             </div>
             <div className="p-6 space-y-4">
-              <select
-                value={arch}
-                onChange={(e) => setArch(e.target.value)}
-                disabled={isRunning}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
-              >
-                <option value="GNS">GNS — Graph Network Simulator</option>
-                <option value="TNS">TNS — Transformer Neural Simulator</option>
-                <option value="SAGE">SAGE — GraphSAGE Processor</option>
-              </select>
+              {/* Architecture picker cards */}
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  {
+                    id: 'GNS',
+                    label: 'GNS',
+                    sub: 'Graph Network Simulator',
+                    badge: 'DeepMind Default',
+                    badgeColor: 'bg-green-500/15 text-green-400',
+                    tooltip: [
+                      '🏆 DeepMind MeshGraphNets default.',
+                      '• Sum-aggregation + MLP per message-passing step.',
+                      '• Edge features updated every step.',
+                      '✅ Best for: cylinder_flow (CFD), any transient mesh sim.',
+                      '✅ Fastest to train, most interpretable.',
+                      '⚠ Can over-smooth on very large meshes (>50k nodes).',
+                    ],
+                  },
+                  {
+                    id: 'TNS',
+                    label: 'TNS',
+                    sub: 'Transformer Neural Sim',
+                    badge: 'Attention-based',
+                    badgeColor: 'bg-purple-500/15 text-purple-400',
+                    tooltip: [
+                      '🔮 Multi-head dot-product attention processor.',
+                      '• Edge features enter the attention key → geometry-aware.',
+                      '• Learned β-gate blends self-transform + attention.',
+                      '✅ Best for: global physics coupling (pressure waves, acoustics).',
+                      '✅ Better long-range dependencies than GNS.',
+                      '⚠ ~20% slower per epoch; needs heads to divide 128.',
+                    ],
+                  },
+                  {
+                    id: 'SAGE',
+                    label: 'SAGE',
+                    sub: 'GraphSAGE Processor',
+                    badge: 'Scalable',
+                    badgeColor: 'bg-blue-500/15 text-blue-400',
+                    tooltip: [
+                      '📐 Mean-aggregation of neighbor node features.',
+                      '• No edge feature updates → lower memory per step.',
+                      '• L2-normalize output reduces over-smoothing.',
+                      '✅ Best for: large meshes (cloth, flag_simple, deformable bodies).',
+                      '✅ Fastest inference, lowest VRAM.',
+                      '⚠ No edge geometry in message-passing (only encoder).',
+                    ],
+                  },
+                ] as const).map(({ id, label, sub, badge, badgeColor, tooltip }) => (
+                  <div key={id} className="relative group">
+                    <button
+                      onClick={() => !isRunning && setArch(id)}
+                      disabled={isRunning}
+                      className={`w-full text-left p-3 rounded-xl border transition-all ${
+                        arch === id
+                          ? 'border-blue-500/60 bg-blue-500/10'
+                          : 'border-slate-700 bg-slate-950 hover:border-slate-600'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className={`text-sm font-bold font-mono ${arch === id ? 'text-blue-300' : 'text-slate-200'}`}>{label}</span>
+                        {arch === id && <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />}
+                      </div>
+                      <p className="text-[9px] text-slate-500 leading-tight mb-1.5">{sub}</p>
+                      <span className={`inline-block text-[8px] font-bold px-1.5 py-0.5 rounded ${badgeColor}`}>{badge}</span>
+                    </button>
+                    {/* Tooltip */}
+                    <div className="pointer-events-none absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                      <div className="bg-slate-950 border border-slate-700 rounded-xl p-3 shadow-2xl">
+                        <p className="text-[10px] font-bold text-white mb-2">{label} — {sub}</p>
+                        <ul className="space-y-1">
+                          {tooltip.map((line, i) => (
+                            <li key={i} className="text-[9px] text-slate-300 leading-snug">{line}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="w-2 h-2 bg-slate-950 border-b border-r border-slate-700 rotate-45 mx-auto -mt-1" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
               {/* TNS hyperparameters */}
               {arch === 'TNS' && (
                 <div className="space-y-3 pt-1">
@@ -468,22 +540,6 @@ export const Train: React.FC = () => {
                   </label>
                 </div>
               )}
-              <div className="overflow-hidden border border-slate-800 rounded-lg">
-                <table className="w-full text-[10px] text-left">
-                  <thead className="bg-slate-950 text-slate-500 uppercase font-bold">
-                    <tr>
-                      <th className="px-2 py-1.5">Model</th>
-                      <th className="px-2 py-1.5">Best For</th>
-                      <th className="px-2 py-1.5">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800 text-slate-400">
-                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">GNS</td><td className="px-2 py-1.5">Transient CFD</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
-                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">TNS</td><td className="px-2 py-1.5">Global Physics</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
-                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">SAGE</td><td className="px-2 py-1.5">Large Meshes</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
-                  </tbody>
-                </table>
-              </div>
             </div>
           </section>
 

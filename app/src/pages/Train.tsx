@@ -12,7 +12,7 @@ export const Train: React.FC = () => {
     epochs: 100,
     batch_size: _initDomain === 'flag_simple' ? 1 : 20,
     lr: 0.0001,
-    noise_std: 0.02,
+    noise_std: _initDomain === 'flag_simple' ? 0.003 : 0.02,
     early_stopping_patience: 10,
     message_passing_steps: 15,
     target_field: 'velocity',
@@ -368,7 +368,7 @@ export const Train: React.FC = () => {
             <div className="p-6 space-y-3">
               <select
                 value={config.domain}
-                onChange={(e) => setConfig({ ...config, domain: e.target.value, target_field: 'velocity', batch_size: e.target.value === 'flag_simple' ? 1 : 20 })}
+                onChange={(e) => setConfig({ ...config, domain: e.target.value, target_field: 'velocity', batch_size: e.target.value === 'flag_simple' ? 1 : 20, noise_std: e.target.value === 'flag_simple' ? 0.003 : 0.02 })}
                 disabled={isRunning}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
               >

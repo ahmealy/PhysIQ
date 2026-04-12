@@ -538,6 +538,14 @@ def _get_train_processes() -> list[dict]:
                         with open(cmd[i + 1]) as f:
                             cfg = json.load(f)
                         domain = cfg.get("domain", "unknown")
+                        # If CUDA is available on this machine, local training uses it
+                        try:
+                            import torch
+                            if torch.cuda.is_available():
+                                gpu = torch.cuda.get_device_name(0)
+                                device = f"local GPU ({gpu})"
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     break

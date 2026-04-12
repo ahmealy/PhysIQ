@@ -132,9 +132,12 @@ class FlagSimulator(nn.Module):
 
         node_feats = self._build_node_features(graph, node_type_col)
 
-        # Optional noise injection (same as simulator.py) for training stability
+        # Optional noise injection on the velocity component only (first 3 dims).
+        # node_feats is [N, 12] = velocity[3] + one_hot[9].
+        # velocity_sequence_noise is [N, 3] — add only to the velocity slice.
         if velocity_sequence_noise is not None:
-            node_feats = node_feats + velocity_sequence_noise
+            node_feats = node_feats.clone()
+            node_feats[:, :3] = node_feats[:, :3] + velocity_sequence_noise
 
         graph.x    = self._node_normalizer(node_feats, self.training)
         graph.edge_attr = self._edge_normalizer(graph.edge_attr, self.training)

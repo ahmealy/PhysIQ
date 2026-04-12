@@ -69,6 +69,9 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
         elapsed:    wall-clock seconds for the full rollout
     """
     num_samples_per_tra = dataset.num_sampes_per_tra
+    # Grab raw faces before transformer runs
+    _raw_graph = dataset[rollout_index * num_samples_per_tra]
+    _faces = _raw_graph.face.numpy().T.astype(np.int32)  # [F, 3]
     predicted_velocity = None
     boundary_mask = None
     predicteds = []
@@ -118,7 +121,13 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
     os.makedirs('result', exist_ok=True)
     pkl_path = 'result/result%d.pkl' % rollout_index
     with open(pkl_path, 'wb') as f:
-        pickle.dump([result, crds], f)
+        pickle.dump([result, crds, {
+            "domain":          "cylinder_flow",
+            "target_field":    "velocity",
+            "faces":           _faces,
+            "speedup":         round((n_steps * 0.01) / elapsed, 2),
+            "elapsed_seconds": round(elapsed, 3),
+        }], f)
     print('Result saved to %s' % pkl_path)
 
     return result, crds, elapsed
@@ -170,11 +179,19 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
     for step in range(0, steps_per_traj, 50):
         print("rollout position rmse @ step %d: %.2e" % (step, per_step_rmse[step]))
 
-    mesh_pos = np.asarray(dataset.mesh_pos_list[rollout_index], dtype=np.float32)
+    _npz = np.load(os.path.join(dataset._split_dir, f"traj_{rollout_index:05d}.npz"))
+    mesh_pos = _npz["mesh_pos"].astype(np.float32)
+    cells = _npz["cells"].astype(np.int32)  # [F, 3]
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/flag_result%d.pkl" % rollout_index
     with open(pkl_path, "wb") as f:
-        pickle.dump([[predicted_arr, targets_arr], mesh_pos, {"domain": "flag_simple"}], f)
+        pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
+            "domain":          "flag_simple",
+            "target_field":    "world_pos",
+            "faces":           cells,
+            "speedup":         round((steps_per_traj * 0.01) / elapsed, 2),
+            "elapsed_seconds": round(elapsed, 3),
+        }], f)
     print("Result saved to %s" % pkl_path)
     return [predicted_arr, targets_arr], mesh_pos, elapsed
 

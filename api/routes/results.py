@@ -96,7 +96,11 @@ def _load_pkl(filename: str):
 
     # Precompute triangles once and cache alongside arrays — avoids re-running
     # Delaunay triangulation (62 ms) on every /results/{filename} request.
-    triangles = _get_triangles(crds)
+    stored_faces = meta.get("faces")
+    if stored_faces is not None:
+        triangles = np.asarray(stored_faces, dtype=np.int32)
+    else:
+        triangles = _get_triangles(crds)
 
     parsed = (predicted, targets, crds, meta, triangles)
     _pkl_cache.put(cache_key, parsed)
@@ -123,6 +127,9 @@ def _compute_rmse(predicted: np.ndarray, targets: np.ndarray) -> np.ndarray:
 def _compute_mae(predicted: np.ndarray, targets: np.ndarray,
                  target_field: str = "velocity") -> np.ndarray:
     """Per-step MAE of field magnitude across nodes, shape [T]."""
+    if target_field == "world_pos":
+        # Mean per-node 3D position error per timestep
+        return np.mean(np.linalg.norm(predicted - targets, axis=-1), axis=1)
     if target_field == "pressure":
         pred_mag   = predicted[:, :, 0]   # [T, N] — scalar pressure, no norm
         target_mag = targets[:, :, 0]     # [T, N]
@@ -191,6 +198,8 @@ def get_result(filename: str):
     domain = meta.get("domain", "cylinder_flow")
     target_field = meta.get("target_field", "velocity")
     is_generate = bool(meta.get("is_generate", False))
+    speedup         = meta.get("speedup", None)
+    elapsed_seconds = meta.get("elapsed_seconds", None)
 
     # Compute a quick single scalar RMSE for the header badge (cheap: only step 0)
     rmse_step0 = _safe_float(float(np.sqrt(np.mean(np.square(predicted[0] - targets[0])))))
@@ -202,8 +211,8 @@ def get_result(filename: str):
         "crds":             crds.tolist(),
         "triangles":        triangles.tolist(),
         "per_step_rmse":    None,        # fetch separately via /rmse if needed
-        "elapsed_seconds":  None,
-        "speedup":          None,
+        "elapsed_seconds":  elapsed_seconds,
+        "speedup":          speedup,
         "confidence_score": confidence_score,
         "confidence_label": confidence_label,
         "domain":           domain,
@@ -226,17 +235,24 @@ def get_frame(filename: str, t: int):
     if t < 0 or t >= T:
         raise HTTPException(400, "Timestep %d out of range (0-%d)" % (t, T - 1))
 
-    if target_field == "pressure":
+    if target_field == "world_pos":
+        # Cloth: per-node 3D position error magnitude
+        pred_mag   = np.linalg.norm(predicted[t], axis=-1)
+        target_mag = np.linalg.norm(targets[t],   axis=-1)
+        error      = np.linalg.norm(predicted[t] - targets[t], axis=-1)
+    elif target_field == "pressure":
         pred_mag   = predicted[t, :, 0]   # [N] — scalar pressure
         target_mag = targets[t, :, 0]     # [N]
+        error      = np.abs(pred_mag - target_mag)
     else:
         # velocity (2D), world_pos (3D cloth), or any other multi-dim field
         pred_mag   = np.linalg.norm(predicted[t], axis=-1)   # [N]
         target_mag = np.linalg.norm(targets[t],   axis=-1)   # [N]
-    error = np.abs(pred_mag - target_mag)   # [N]
+        error      = np.abs(pred_mag - target_mag)
     rmse  = float(np.sqrt(np.mean(np.square(predicted[t] - targets[t]))))
 
-    return {
+    domain = meta.get("domain", "cylinder_flow")
+    resp = {
         "t":                    t,
         "time_seconds":         round(t * 0.01, 3),
         "predicted_magnitude":  _safe_list(pred_mag),
@@ -245,6 +261,10 @@ def get_frame(filename: str, t: int):
         "rmse":                 _safe_float(rmse),
         "target_field":         target_field,
     }
+    if domain == "flag_simple":
+        resp["world_pos_pred"]   = predicted[t].tolist()   # [N, 3]
+        resp["world_pos_target"] = targets[t].tolist()     # [N, 3]
+    return resp
 
 
 @router.get("/{filename}/rmse")
@@ -282,3 +302,62 @@ def delete_result(filename: str):
     os.remove(path)
     _pkl_cache.invalidate_filename(filename)   # drop from cache
     return {"status": "deleted", "filename": filename}
+
+
+@router.get("/{filename}/download")
+def download_result(filename: str):
+    """Download the raw pkl file."""
+    from fastapi.responses import FileResponse
+    safe_dir = os.path.realpath(RESULT_DIR)
+    path = os.path.realpath(os.path.join(RESULT_DIR, filename))
+    if not path.startswith(safe_dir + os.sep):
+        raise HTTPException(400, "Invalid filename")
+    if not os.path.exists(path):
+        raise HTTPException(404, "File not found: %s" % filename)
+    return FileResponse(path, media_type="application/octet-stream", filename=filename)
+
+
+@router.get("/{filename}/cloth_physics")
+def get_cloth_physics(filename: str):
+    """Per-step edge stretch statistics for cloth (flag_simple) rollouts."""
+    predicted, targets, crds, meta, triangles = _load_pkl(filename)
+    domain = meta.get("domain", "cylinder_flow")
+    if domain != "flag_simple":
+        raise HTTPException(400, "cloth_physics only available for flag_simple domain")
+
+    # Use stored faces if available, else use triangles (Delaunay fallback)
+    faces = np.asarray(meta.get("faces", triangles), dtype=np.int32)  # [F, 3]
+
+    # Build unique undirected edges from face list
+    edge_set = set()
+    for f in faces:
+        for i, j in [(int(f[0]), int(f[1])), (int(f[1]), int(f[2])), (int(f[0]), int(f[2]))]:
+            edge_set.add((min(i, j), max(i, j)))
+    if len(edge_set) == 0:
+        raise HTTPException(500, "No edges found in mesh")
+    edges = np.array(sorted(edge_set), dtype=np.int32)  # [E, 2]
+
+    # Rest lengths from 2D mesh_pos (crds = mesh_pos for cloth)
+    # Pad to 3D with z=0 for norm computation
+    mesh_pos_3d = np.pad(crds, ((0, 0), (0, 1)), constant_values=0.0)  # [N, 3]
+    rest_lens = np.linalg.norm(
+        mesh_pos_3d[edges[:, 0]] - mesh_pos_3d[edges[:, 1]], axis=-1
+    )  # [E]
+
+    T = predicted.shape[0]
+    mean_stretches = []
+    max_stretches  = []
+    for t_idx in range(T):
+        world_lens = np.linalg.norm(
+            predicted[t_idx, edges[:, 0]] - predicted[t_idx, edges[:, 1]], axis=-1
+        )  # [E]
+        stretch = np.abs(world_lens / (rest_lens + 1e-8) - 1.0)
+        mean_stretches.append(_safe_float(float(np.mean(stretch))))
+        max_stretches.append(_safe_float(float(np.max(stretch))))
+
+    times = [round(i * 0.01, 3) for i in range(T)]
+    return {
+        "per_step_mean_stretch": mean_stretches,
+        "per_step_max_stretch":  max_stretches,
+        "times":                 times,
+    }

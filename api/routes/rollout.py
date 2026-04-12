@@ -93,6 +93,8 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     ])
 
     n_steps = dataset.num_sampes_per_tra
+    _raw_graph = dataset[req.trajectory_index * n_steps]
+    faces = _raw_graph.face.numpy().T.astype(np.int32)  # [F, 3]
     predicted_velocity = None
     boundary_mask = None
     predicteds, targets_list = [], []
@@ -197,9 +199,12 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     pkl_path = "result/result%d.pkl" % req.trajectory_index
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], crds, {
-            "domain":           req.domain,
-            "target_field":     target_field,
-            "confidence_score": confidence_score,
+            "domain":            req.domain,
+            "target_field":      target_field,
+            "confidence_score":  confidence_score,
+            "faces":             faces,
+            "speedup":           round(speedup, 2),
+            "elapsed_seconds":   round(elapsed, 3),
         }], f)
 
     return {
@@ -268,6 +273,7 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     # does not cache mesh_pos_list as an attribute.
     _traj_path = os.path.join(dataset._split_dir, f"traj_{req.trajectory_index:05d}.npz")
     mesh_pos = np.load(_traj_path)["mesh_pos"].astype(np.float32)
+    cells = np.load(_traj_path)["cells"].astype(np.int32)  # [F, 3]
 
     sq = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
     per_step_rmse = np.sqrt(np.mean(sq, axis=1))
@@ -295,9 +301,12 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     pkl_path = "result/flag_result%d.pkl" % req.trajectory_index
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
-            "domain":           "flag_simple",
-            "target_field":     "velocity",
-            "confidence_score": confidence_score,
+            "domain":            "flag_simple",
+            "target_field":      "world_pos",
+            "confidence_score":  confidence_score,
+            "faces":             cells,
+            "speedup":           round(speedup, 2),
+            "elapsed_seconds":   round(elapsed, 3),
         }], f)
 
     return {

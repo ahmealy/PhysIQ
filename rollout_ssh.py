@@ -108,10 +108,29 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
 
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/result%d.pkl" % traj_idx
+
+    # Confidence score — requires domain-scoped embedding_index built after training
+    confidence_score = None
+    _domain_slug = domain.replace("_", "")  # cylinderflow, flagsimple
+    index_path = os.path.join("runs", "embedding_index_%s.pkl" % _domain_slug)
+    if os.path.exists(index_path):
+        try:
+            from confidence.index import NearestNeighborIndex
+            from model.embedding import extract_embedding
+
+            _index = NearestNeighborIndex.load(index_path)
+            _first_graph = dataset[traj_idx * n_steps]
+            _first_graph = transformer(_first_graph)
+            _emb = extract_embedding(model, _first_graph, device=device)
+            confidence_score = float(_index.query(_emb))
+        except Exception:
+            pass  # confidence is optional — never block the rollout
+
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], crds, {
-            "domain":       domain,
-            "target_field": target_field,
+            "domain":           domain,
+            "target_field":     target_field,
+            "confidence_score": confidence_score,
         }], f)
 
     return {
@@ -120,7 +139,7 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
         "pkl_path":        pkl_path,
         "rmse_final":      float(per_step_rmse[-1]),
         "similarity_score": None,
-        "confidence_score": None,
+        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
     }
 
 
@@ -183,10 +202,29 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
 
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/flag_result%d.pkl" % traj_idx
+
+    # Confidence score — requires domain-scoped embedding_index built after training
+    confidence_score = None
+    index_path = os.path.join("runs", "embedding_index_flagsimple.pkl")
+    if os.path.exists(index_path):
+        try:
+            from confidence.index import NearestNeighborIndex
+            from model.embedding import extract_embedding
+
+            _index = NearestNeighborIndex.load(index_path)
+            # Cloth uses no transform — index was built the same way
+            _first_idx = int(dataset._cum_steps[traj_idx])
+            _first_graph = dataset[_first_idx]
+            _emb = extract_embedding(model, _first_graph, device=device)
+            confidence_score = float(_index.query(_emb))
+        except Exception:
+            pass  # confidence is optional — never block the rollout
+
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
-            "domain":       "flag_simple",
-            "target_field": "velocity",
+            "domain":           "flag_simple",
+            "target_field":     "velocity",
+            "confidence_score": confidence_score,
         }], f)
 
     return {
@@ -195,7 +233,7 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
         "pkl_path":        pkl_path,
         "rmse_final":      float(per_step_rmse[-1]),
         "similarity_score": None,
-        "confidence_score": None,
+        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
     }
 
 

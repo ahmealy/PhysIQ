@@ -5,6 +5,8 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { MeshPlot } from '../components/MeshPlot';
 import * as d3 from 'd3';
 import { cn } from '@/src/lib/utils';
+import { useNavigate } from 'react-router-dom';
+import { ClothPlot3D } from '../components/ClothPlot3D';
 
 const LS_LAST_FILE_KEY = 'visualize_last_file';
 
@@ -26,6 +28,18 @@ export const Visualize: React.FC = () => {
   const [physicsEverLoaded, setPhysicsEverLoaded] = useState(false);
   const [trainEpochs, setTrainEpochs] = useState<any[]>([]);
   const [isLoadingPhysics, setIsLoadingPhysics] = useState(false);
+
+  const navigate = useNavigate();
+
+  // Linked 3D camera state for cloth viewer
+  const [sharedCameraState, setSharedCameraState] = useState<{
+    position: { x: number; y: number; z: number };
+    quaternion: { x: number; y: number; z: number; w: number };
+    target: { x: number; y: number; z: number };
+  } | null>(null);
+
+  // Cloth physics data
+  const [clothPhysicsData, setClothPhysicsData] = useState<any>(null);
 
   // Persist last viewed file so navigating away and back restores it
   useEffect(() => {
@@ -65,6 +79,14 @@ export const Visualize: React.FC = () => {
       .catch(() => setIsLoadingPhysics(false));
   }, [t, activeTab, filename]);
 
+  useEffect(() => {
+    if (!filename || metadata?.domain !== 'flag_simple' || activeTab !== 'physics') return;
+    fetch(`/api/results/${filename}/cloth_physics`)
+      .then(r => r.json())
+      .then(setClothPhysicsData)
+      .catch(() => {});
+  }, [filename, metadata?.domain, activeTab]);
+
   const [colorRange, setColorRange] = useState<[number, number] | null>(null);
 
   const mae = currentFrame ? d3.mean((currentFrame.error as (number|null)[]).filter((x): x is number => x !== null)) ?? 0 : 0;
@@ -86,7 +108,7 @@ export const Visualize: React.FC = () => {
   const isGenerate: boolean = metadata?.is_generate === true;
 
   const fieldLabel = metadata?.domain === "flag_simple"
-    ? "Position Magnitude (m)"
+    ? "World Position (m)"
     : metadata?.target_field === "pressure"
       ? "Pressure (Pa)"
       : "Velocity Magnitude (m/s)";
@@ -168,9 +190,13 @@ export const Visualize: React.FC = () => {
                 Generated Design
               </span>
             ) : (
-              <span className="px-2 py-0.5 bg-blue-600/20 text-blue-400 text-[10px] font-bold rounded border border-blue-500/20 uppercase tracking-wider">
-                {metadata.speedup}x Real-time
-              </span>
+              <>
+                {metadata.speedup != null && (
+                  <span className="px-2 py-0.5 bg-blue-600/20 text-blue-400 text-[10px] font-bold rounded border border-blue-500/20 uppercase tracking-wider">
+                    {metadata.speedup}x Real-time
+                  </span>
+                )}
+              </>
             )}
           </div>
           <p className="text-slate-500 text-sm mt-1">
@@ -197,10 +223,22 @@ export const Visualize: React.FC = () => {
             </div>
           )}
           <div className="flex gap-2">
-            <button className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors">
+            <button
+              onClick={() => window.open(`/api/results/${filename}/download`, '_blank')}
+              className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+              title="Download result file"
+            >
               <Download className="w-5 h-5" />
             </button>
-            <button className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors">
+            <button
+              onClick={async () => {
+                if (!window.confirm(`Delete ${filename}?`)) return;
+                await fetch(`/api/results/${filename}`, { method: 'DELETE' });
+                navigate('/predict');
+              }}
+              className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors"
+              title="Delete this result"
+            >
               <Trash2 className="w-5 h-5" />
             </button>
           </div>
@@ -217,46 +255,86 @@ export const Visualize: React.FC = () => {
                 <Info className="w-3.5 h-3.5 flex-shrink-0" />
                 This is a generated candidate — no simulator ground truth exists. The panel shows the GNN forward rollout only.
               </div>
-              <div className="h-[400px]">
-                <MeshPlot
-                  crds={metadata.crds}
-                  triangles={metadata.triangles}
-                  values={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
-                  title={`GNN Prediction — ${fieldLabel}`}
-                  domain={metadata.domain}
-                  minVal={colorRange?.[0]}
-                  maxVal={colorRange?.[1]}
-                />
-              </div>
+              {metadata.domain === 'flag_simple' ? (
+                <div className="h-[520px]">
+                  <ClothPlot3D
+                    worldPositions={(currentFrame.world_pos_pred ?? []) as [number,number,number][]}
+                    faces={metadata.triangles as [number,number,number][]}
+                    title={`GNN Prediction — ${fieldLabel}`}
+                    colorValues={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
+                    minVal={colorRange?.[0]}
+                    maxVal={colorRange?.[1]}
+                  />
+                </div>
+              ) : (
+                <div className="h-[400px]">
+                  <MeshPlot
+                    crds={metadata.crds}
+                    triangles={metadata.triangles}
+                    values={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
+                    title={`GNN Prediction — ${fieldLabel}`}
+                    domain={metadata.domain}
+                    minVal={colorRange?.[0]}
+                    maxVal={colorRange?.[1]}
+                  />
+                </div>
+              )}
             </div>
           ) : (
             /* Full predict rollout: GT + Prediction + Error */
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 h-[400px]">
-              <MeshPlot
-                crds={metadata.crds}
-                triangles={metadata.triangles}
-                values={(currentFrame.target_magnitude as (number|null)[]).map(v => v ?? 0)}
-                title={`Ground Truth — ${fieldLabel}`}
-                domain={metadata.domain}
-              />
-              <MeshPlot
-                crds={metadata.crds}
-                triangles={metadata.triangles}
-                values={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
-                title={`Prediction — ${fieldLabel}`}
-                domain={metadata.domain}
-              />
-              <MeshPlot
-                crds={metadata.crds}
-                triangles={metadata.triangles}
-                values={(currentFrame.error as (number|null)[]).map(v => v ?? 0)}
-                title="Error Magnitude"
-                minVal={0}
-                maxVal={0.1}
-                colorScale={d3.scaleSequential(d3.interpolateReds).domain([0, 0.1])}
-                domain={metadata.domain}
-              />
-            </div>
+            <>
+              {metadata.domain === 'flag_simple' ? (
+                /* 3D cloth viewer — two panels side by side */
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 h-[520px]">
+                  <ClothPlot3D
+                    worldPositions={(currentFrame.world_pos_target ?? []) as [number,number,number][]}
+                    faces={metadata.triangles as [number,number,number][]}
+                    title={`Ground Truth — ${fieldLabel}`}
+                    colorValues={(currentFrame.target_magnitude as (number|null)[]).map(v => v ?? 0)}
+                    minVal={colorRange?.[0]}
+                    maxVal={colorRange?.[1]}
+                    onCameraChange={setSharedCameraState}
+                  />
+                  <ClothPlot3D
+                    worldPositions={(currentFrame.world_pos_pred ?? []) as [number,number,number][]}
+                    faces={metadata.triangles as [number,number,number][]}
+                    title={`Prediction — ${fieldLabel}`}
+                    colorValues={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
+                    minVal={colorRange?.[0]}
+                    maxVal={colorRange?.[1]}
+                    sharedCameraState={sharedCameraState}
+                  />
+                </div>
+              ) : (
+                /* CFD / pressure: existing 3-panel MeshPlot grid */
+                <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 h-[400px]">
+                  <MeshPlot
+                    crds={metadata.crds}
+                    triangles={metadata.triangles}
+                    values={(currentFrame.target_magnitude as (number|null)[]).map(v => v ?? 0)}
+                    title={`Ground Truth — ${fieldLabel}`}
+                    domain={metadata.domain}
+                  />
+                  <MeshPlot
+                    crds={metadata.crds}
+                    triangles={metadata.triangles}
+                    values={(currentFrame.predicted_magnitude as (number|null)[]).map(v => v ?? 0)}
+                    title={`Prediction — ${fieldLabel}`}
+                    domain={metadata.domain}
+                  />
+                  <MeshPlot
+                    crds={metadata.crds}
+                    triangles={metadata.triangles}
+                    values={(currentFrame.error as (number|null)[]).map(v => v ?? 0)}
+                    title="Error Magnitude"
+                    minVal={0}
+                    autoScale={true}
+                    colorScale={d3.scaleSequential(d3.interpolateReds).domain([0, 0.1])}
+                    domain={metadata.domain}
+                  />
+                </div>
+              )}
+            </>
           )}
 
           {/* Playback Controls */}
@@ -506,9 +584,44 @@ export const Visualize: React.FC = () => {
       {activeTab === 'physics' && !isGenerate && (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
           {metadata?.domain === 'flag_simple' ? (
-            <div className="text-center py-12 text-slate-400">
-              <p className="text-lg mb-2">Physics analysis not available for cloth simulation</p>
-              <p className="text-sm">Vorticity and energy conservation metrics apply to CFD (cylinder flow) only.</p>
+            <div className="space-y-6">
+              <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-semibold text-white">Edge Stretch (Elastic Deformation)</h3>
+                  <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+                    stretch = |world_edge_len / rest_len − 1|
+                  </p>
+                </div>
+                {clothPhysicsData ? (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={clothPhysicsData.per_step_mean_stretch.map((v: number, i: number) => ({
+                        t: clothPhysicsData.times?.[i] ?? i * 0.01,
+                        mean: v,
+                        max: clothPhysicsData.per_step_max_stretch?.[i] ?? null,
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                        <XAxis dataKey="t" stroke="#64748b" fontSize={10} tickFormatter={(v) => `${parseFloat(v).toFixed(1)}s`} />
+                        <YAxis stroke="#64748b" fontSize={10} tickFormatter={(v) => (v * 100).toFixed(1) + '%'} />
+                        <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px' }}
+                          labelFormatter={(v) => `t=${parseFloat(v as string).toFixed(2)}s`}
+                          formatter={(v: number) => [(v * 100).toFixed(2) + '%']} />
+                        <Legend verticalAlign="top" height={24} iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
+                        <Line type="monotone" dataKey="mean" stroke="#3b82f6" strokeWidth={2} dot={false} name="Mean Stretch" />
+                        <Line type="monotone" dataKey="max"  stroke="#fb7185" strokeWidth={1.5} dot={false} name="Max Stretch" strokeDasharray="4 2" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <div className="h-64 flex items-center justify-center text-slate-500 text-sm">
+                    Loading stretch data…
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-500 italic text-center">
+                  Stretch measures how much each mesh edge has deformed from its rest configuration.
+                  High stretch indicates large deformation or potential simulation instability.
+                </p>
+              </section>
             </div>
           ) : (
             <>

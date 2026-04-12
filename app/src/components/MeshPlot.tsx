@@ -11,17 +11,17 @@ interface MeshPlotProps {
   colorScale?: (v: number) => string;
   /** Domain string — used to conditionally render domain-specific overlays. */
   domain?: string;
+  /** When true, vMax is computed from data instead of using maxVal prop */
+  autoScale?: boolean;
+  /** Cylinder obstacle position [cx, cy, radius]. Defaults to [0.2, 0.2, 0.05]. */
+  cylinderPos?: [number, number, number];
 }
 
 export const MeshPlot: React.FC<MeshPlotProps> = ({
-  crds,
-  triangles,
-  values,
-  title,
-  minVal,
-  maxVal,
-  colorScale: customColorScale,
-  domain,
+  crds, triangles, values, title, minVal, maxVal,
+  colorScale: customColorScale, domain,
+  autoScale = false,
+  cylinderPos = [0.2, 0.2, 0.05],
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -94,7 +94,9 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
 
     // Color scale
     const vMin = minVal ?? d3.min(values) ?? 0;
-    const vMax = maxVal ?? d3.max(values) ?? 1.5;
+    const vMax = autoScale
+      ? (d3.max(values) ?? 1.5)
+      : (maxVal ?? d3.max(values) ?? 1.5);
     const colorScale = customColorScale ?? d3.scaleSequential(d3.interpolateTurbo).domain([vMin, vMax]);
 
     // Clear
@@ -106,29 +108,76 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
       const v2 = values[i2];
       const v3 = values[i3];
 
-      const avgVal = (v1 + v2 + v3) / 3;
-      ctx.fillStyle = colorScale(avgVal);
-      ctx.strokeStyle = colorScale(avgVal);
-      ctx.lineWidth = 0.5;
+      const x1 = xScale(crds[i1][0]), y1 = yScale(crds[i1][1]);
+      const x2 = xScale(crds[i2][0]), y2 = yScale(crds[i2][1]);
+      const x3 = xScale(crds[i3][0]), y3 = yScale(crds[i3][1]);
 
-      ctx.beginPath();
-      ctx.moveTo(xScale(crds[i1][0]), yScale(crds[i1][1]));
-      ctx.lineTo(xScale(crds[i2][0]), yScale(crds[i2][1]));
-      ctx.lineTo(xScale(crds[i3][0]), yScale(crds[i3][1]));
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      // Centroid and edge midpoints for smooth-shading approximation
+      const mx12 = (x1 + x2) / 2, my12 = (y1 + y2) / 2, mv12 = (v1 + v2) / 2;
+      const mx23 = (x2 + x3) / 2, my23 = (y2 + y3) / 2, mv23 = (v2 + v3) / 2;
+      const mx13 = (x1 + x3) / 2, my13 = (y1 + y3) / 2, mv13 = (v1 + v3) / 2;
+
+      // Simpler: draw the 3 corner sub-triangles + 1 middle
+      const subTriangles: [number, number, number, number, number, number, number][] = [
+        [x1, y1, mx12, my12, mx13, my13, (v1 + mv12 + mv13) / 3],
+        [mx12, my12, x2, y2, mx23, my23, (mv12 + v2 + mv23) / 3],
+        [mx13, my13, mx23, my23, x3, y3, (mv13 + mv23 + v3) / 3],
+        [mx12, my12, mx23, my23, mx13, my13, (mv12 + mv23 + mv13) / 3],
+      ];
+
+      subTriangles.forEach(([ax, ay, bx, by, ccx, ccy, val]) => {
+        ctx.fillStyle = colorScale(val);
+        ctx.strokeStyle = colorScale(val);
+        ctx.lineWidth = 0.3;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.lineTo(ccx, ccy);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      });
     });
 
     // Draw cylinder obstacle — only for CFD domain (mocked at x=0.2, y=0.2, r=0.05)
     if (domain === 'cylinder_flow' || domain == null) {
+      const [cylX, cylY, cylR] = cylinderPos;
       ctx.fillStyle = '#1e293b';
       ctx.beginPath();
-      ctx.arc(xScale(0.2), yScale(0.2), (xScale(0.05) - xScale(0)), 0, Math.PI * 2);
+      ctx.arc(xScale(cylX), yScale(cylY), (xScale(cylR) - xScale(0)), 0, Math.PI * 2);
       ctx.fill();
     }
 
-  }, [crds, triangles, values, minVal, maxVal, customColorScale, domain]);
+    // Draw colorbar on right side (only when there's enough horizontal space)
+    const cbWidth = 12;
+    const cbHeight = Math.min(drawHeight * 0.7, 150);
+    const cbX = offsetX + drawWidth + 8;
+    const cbY = offsetY + (drawHeight - cbHeight) / 2;
+
+    if (cbX + cbWidth + 35 <= width) {
+      // Gradient bar
+      const grad = ctx.createLinearGradient(cbX, cbY + cbHeight, cbX, cbY);
+      const nStops = 10;
+      for (let s = 0; s <= nStops; s++) {
+        const frac = s / nStops;
+        const val  = vMin + frac * (vMax - vMin);
+        grad.addColorStop(frac, colorScale(val));
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(cbX, cbY, cbWidth, cbHeight);
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(cbX, cbY, cbWidth, cbHeight);
+
+      // Labels
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(vMax.toFixed(3), cbX + cbWidth + 3, cbY + 9);
+      ctx.fillText(vMin.toFixed(3), cbX + cbWidth + 3, cbY + cbHeight);
+    }
+
+  }, [crds, triangles, values, minVal, maxVal, customColorScale, domain, autoScale, cylinderPos]);
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-900/50 rounded-lg border border-slate-700 overflow-hidden">

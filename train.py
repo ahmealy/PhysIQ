@@ -37,6 +37,7 @@ _defaults = dict(
     tns_dropout              = 0.0,
     sage_aggr                = 'mean',
     sage_normalize           = True,
+    noise_std_cloth          = 3e-3,   # DeepMind cloth: σ=0.003
 )
 
 parser = argparse.ArgumentParser()
@@ -126,6 +127,21 @@ else:
 optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg['lr'])
 print('Optimizer initialized')
 
+# ── LR scheduler (cloth only — DeepMind exponential decay per gradient step) ─
+if domain == 'flag_simple':
+    # DeepMind: lr × 0.1^(global_step / 5_000_000), floored at 1e-6
+    # Per-step gamma: 0.1^(1/5_000_000)
+    _gamma_per_step = 0.1 ** (1.0 / 5_000_000)
+    lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=_gamma_per_step)
+    _lr_min = 1e-6
+else:
+    lr_scheduler = None
+    _lr_min = None
+
+# ── Normalizer warmup (cloth only — DeepMind: accumulate stats for 1000 steps) ─
+WARMUP_STEPS = cfg.get('warmup_steps', 1000 if domain == 'flag_simple' else 0)
+_warmup_budget_remaining = WARMUP_STEPS  # decremented each epoch
+
 # TensorBoard writer
 writer = SummaryWriter(log_dir=log_dir)
 
@@ -160,11 +176,14 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
     print(f'Resumed from epoch {ckpt["epoch"]} with valid loss {best_valid_loss:.2e}')
     return start_epoch, best_valid_loss
 
-def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain, target_field="velocity"):
+def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain,
+                    target_field="velocity", lr_scheduler=None, lr_min=None, warmup_budget=0,
+                    noise_std_cloth: float = 3e-3):
     assert target_field in ("velocity", "pressure"), f"Unknown target_field: {target_field!r}"
     model.train()
     total_loss = 0.0
     num_batches = 0
+    _warmup_remaining = warmup_budget
 
     for graph in tqdm.tqdm(dataloader):
         if transformer is not None:
@@ -172,7 +191,9 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
         graph = graph.to(device)
 
         if domain == 'flag_simple':
-            predicted_acc, target_acc = model(graph)
+            # Cloth noise (DeepMind: σ=0.003 on velocity component of node features)
+            velocity_noise = torch.randn(graph.x.shape[0], 3, device=device) * noise_std_cloth
+            predicted_acc, target_acc = model(graph, velocity_sequence_noise=velocity_noise)
             # Cloth: loss on NORMAL nodes only
             # DeepMind formula: mean_over_nodes( sum_over_xyz( err² ) )
             node_type = graph.x[:, 3].long()
@@ -192,13 +213,23 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
             loss = torch.mean(errors)
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if _warmup_remaining > 0:
+            # Warmup: only accumulate normalizer stats, skip weight update
+            _warmup_remaining -= 1
+        else:
+            loss.backward()
+            optimizer.step()
+            # Per-step LR decay (cloth only)
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+                for _pg in optimizer.param_groups:
+                    if _pg['lr'] < lr_min:
+                        _pg['lr'] = lr_min
 
         total_loss += loss.item()
         num_batches += 1
 
-    return total_loss / num_batches
+    return total_loss / num_batches, _warmup_remaining
 
 
 def evaluate(model, dataloader, transformer, device, domain):
@@ -258,7 +289,10 @@ if __name__ == '__main__':
 
     for epoch in range(start_epoch, num_epochs + 1):
 
-        train_loss = train_one_epoch(simulator, train_loader, optimizer, transformer, device, noise_std, domain, target_field)
+        train_loss, _warmup_budget_remaining = train_one_epoch(
+            simulator, train_loader, optimizer, transformer, device, noise_std, domain,
+            target_field=target_field, lr_scheduler=lr_scheduler, lr_min=_lr_min,
+            warmup_budget=_warmup_budget_remaining, noise_std_cloth=cfg.get('noise_std_cloth', 3e-3))
         valid_loss = evaluate(simulator, valid_loader, transformer, device, domain)
 
         print(f"Epoch {epoch}/{num_epochs} Train Loss: {train_loss:.2e} Valid Loss: {valid_loss:.2e}")
@@ -284,6 +318,7 @@ if __name__ == '__main__':
                 'edge_input_size':      edge_input_size,
                 'architecture':         architecture,
                 'tns_heads':            cfg.get('tns_heads', 4),
+                'message_passing_num':  cfg['message_passing_num'],
             }, checkpoint_path)
             print(f"  -> New best model saved at epoch {epoch} with valid loss {valid_loss:.2e}")
         else:

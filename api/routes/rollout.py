@@ -383,30 +383,79 @@ async def run_rollout(req: RolloutRequest):
                     bufsize=1,
                 )
             )
+            done_payload: dict = {}
             try:
                 # Read stdout line-by-line; each SSE line from rollout_ssh.py
                 # is already in the "data: {...}\n" format — forward verbatim.
+                # Do NOT break early on "done" — drain until EOF so the remote
+                # process has fully finished writing the pkl before we scp it.
                 while True:
                     line = await loop.run_in_executor(None, proc.stdout.readline)
                     if not line:
                         break
                     line = line.rstrip("\n")
                     if line.startswith("data: "):
-                        yield line + "\n\n"
-                        # Check if this was the terminal event
                         try:
                             payload = json.loads(line[6:])
-                            if payload.get("type") in ("done", "error"):
+                            if payload.get("type") == "done":
+                                done_payload = payload
+                                # Don't yield yet — copy the file first, then yield done
+                                continue
+                            elif payload.get("type") == "error":
+                                yield line + "\n\n"
                                 break
                         except Exception:
                             pass
-                # If process exited without a done/error event, emit error
+                        yield line + "\n\n"
+
+                # Wait for the remote process to fully exit
                 rc = await loop.run_in_executor(None, proc.wait)
-                if rc != 0:
+
+                if rc != 0 and not done_payload:
                     yield "data: %s\n\n" % json.dumps({
                         "type":    "error",
                         "message": "Remote rollout exited with code %d" % rc,
                     })
+                    return
+
+                # ── scp the result file back from remote ──────────────────
+                if done_payload:
+                    remote_pkl = done_payload.get("pkl_path", "")
+                    if remote_pkl:
+                        os.makedirs("result", exist_ok=True)
+                        local_pkl = os.path.join(
+                            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                            remote_pkl,
+                        )
+                        host     = remote_cfg.get("host", "")
+                        port     = str(remote_cfg.get("port", 22))
+                        user     = remote_cfg.get("user", "")
+                        key_file = remote_cfg.get("key_file", "")
+                        scp_cmd  = ["scp", "-P", port,
+                                    "-o", "StrictHostKeyChecking=no",
+                                    "-o", "BatchMode=yes"]
+                        if key_file:
+                            scp_cmd += ["-i", key_file]
+                        remote_src = "%s@%s:%s" % (user, host, remote_pkl)
+                        scp_cmd += [remote_src, local_pkl]
+
+                        scp_rc = await loop.run_in_executor(
+                            None,
+                            lambda: subprocess.run(scp_cmd, capture_output=True).returncode,
+                        )
+                        if scp_rc != 0:
+                            yield "data: %s\n\n" % json.dumps({
+                                "type":    "error",
+                                "message": "Rollout finished on remote but scp of result failed (rc=%d). "
+                                           "File is at %s on the remote host." % (scp_rc, remote_pkl),
+                            })
+                            return
+
+                        # Update pkl_path to local path before yielding done
+                        done_payload["pkl_path"] = os.path.relpath(local_pkl)
+
+                    yield "data: %s\n\n" % json.dumps(done_payload)
+
             except Exception as e:
                 yield "data: %s\n\n" % json.dumps({"type": "error", "message": str(e)})
             finally:

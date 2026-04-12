@@ -37,6 +37,11 @@ class TrainConfig(BaseModel):
     node_input_size:          int   = 11
     edge_input_size:          int   = 3
     fresh_start:              bool  = False   # if True, delete existing checkpoint before training
+    architecture:             str   = "gn"
+    tns_heads:                int   = 4
+    tns_dropout:              float = 0.0
+    sage_aggr:                str   = "mean"
+    sage_normalize:           bool  = True
 
 
 class RemoteConfig(BaseModel):
@@ -295,6 +300,11 @@ def train_start(config: TrainConfig):
             "early_stopping_patience": config.early_stopping_patience,
             "message_passing_num":     config.message_passing_steps,
             "log_dir":                 "runs",
+            "architecture":            config.architecture,
+            "tns_heads":               config.tns_heads,
+            "tns_dropout":             config.tns_dropout,
+            "sage_aggr":               config.sage_aggr,
+            "sage_normalize":          config.sage_normalize,
         }, f)
 
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -390,14 +400,10 @@ def train_stop():
     orphan = state.get_orphan_pid()
     if orphan:
         # Check if it's a remote nohup job — must kill via SSH
-        remote_pid_file = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "runs", "train_remote.pid"
-        )
         is_remote = False
-        if os.path.exists(remote_pid_file):
+        if os.path.exists(state._train_remote_pid_file):
             try:
-                is_remote = int(open(remote_pid_file).read().strip()) == orphan
+                is_remote = int(open(state._train_remote_pid_file).read().strip()) == orphan
             except (ValueError, OSError):
                 pass
         if is_remote:
@@ -440,20 +446,28 @@ def _get_train_processes() -> list[dict]:
     procs = []
 
     # ── Remote nohup job (no local psutil entry) ──────────────────────────────
-    remote_pid_file = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "runs", "train_remote.pid"
-    )
+    # Use the domain-scoped remote PID file from state (set when training starts)
+    remote_pid_file = state._train_remote_pid_file
     if os.path.exists(remote_pid_file):
         try:
             remote_pid = int(open(remote_pid_file).read().strip())
             log_path   = state.train_log_path
             log_mtime  = os.path.getmtime(log_path) if os.path.exists(log_path) else 0
             log_age    = time.time() - log_mtime
-            if remote_pid > 0 and log_age < 120:
-                # Build elapsed from log file creation time
-                log_ctime  = os.path.getctime(log_path) if os.path.exists(log_path) else time.time()
-                elapsed_s  = int(time.time() - log_ctime)
+            heartbeat_path = state._train_heartbeat_file
+            heartbeat_age  = (time.time() - os.path.getmtime(heartbeat_path)
+                              if os.path.exists(heartbeat_path) else 9999)
+            # Log window: 3600s (cloth epochs can take hours, log only written at end)
+            # Heartbeat window: 180s (touched every 60s by launcher)
+            if remote_pid > 0 and (log_age < 3600 or heartbeat_age < 180):
+                # Build elapsed from persisted start-time (most accurate) or log ctime
+                start_ms = state.get_train_start_time()
+                if start_ms:
+                    elapsed_s = int(time.time() - start_ms / 1000)
+                elif os.path.exists(log_path):
+                    elapsed_s = int(time.time() - os.path.getctime(log_path))
+                else:
+                    elapsed_s = 0
                 hours, rem = divmod(elapsed_s, 3600)
                 mins, secs = divmod(rem, 60)
                 elapsed_str = "%02d:%02d:%02d" % (hours, mins, secs)
@@ -547,12 +561,10 @@ def kill_process(pid: int):
     - Remote nohup jobs (tracked via train_remote.pid): kills via SSH SIGTERM.
     - Local processes: kills via os.kill after psutil safety check.
     """
-    remote_pid_file = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "runs", "train_remote.pid"
-    )
-
     # ── Remote nohup job ──────────────────────────────────────────────────────
+    # Use the domain-scoped remote PID file from state (set when training starts)
+    remote_pid_file = state._train_remote_pid_file
+
     is_remote = False
     if os.path.exists(remote_pid_file):
         try:

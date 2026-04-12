@@ -263,7 +263,11 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
 
     predicted_arr = np.stack(predicteds)
     targets_arr   = np.stack(targets_list)
-    mesh_pos = np.asarray(dataset.mesh_pos_list[req.trajectory_index], dtype=np.float32)
+
+    # Load mesh_pos directly from the traj file — FlagDataset is on-demand and
+    # does not cache mesh_pos_list as an attribute.
+    _traj_path = os.path.join(dataset._split_dir, f"traj_{req.trajectory_index:05d}.npz")
+    mesh_pos = np.load(_traj_path)["mesh_pos"].astype(np.float32)
 
     sq = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
     per_step_rmse = np.sqrt(np.mean(sq, axis=1))

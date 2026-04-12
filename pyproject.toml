@@ -89,6 +89,7 @@ warn_return_any = false         # too noisy with torch tensors
 testpaths   = ["tests"]
 asyncio_mode = "auto"
 addopts     = "-v --tb=short"
+pythonpath  = ["."]
 
 [tool.setuptools.packages.find]
 where   = ["."]

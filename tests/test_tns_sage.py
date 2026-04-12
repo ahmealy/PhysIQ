@@ -280,6 +280,7 @@ def test_get_model_loads_tns_architecture(tmp_path):
         "edge_input_size": 3,
         "architecture": "tns",
         "tns_heads": 4,
+        "message_passing_num": 2,
     }, ckpt_path)
 
     clear_model_cache()

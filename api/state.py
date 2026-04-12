@@ -144,20 +144,20 @@ def get_model(checkpoint_path: str, device: str):
             if domain == "flag_simple":
                 from model.flag_simulator import FlagSimulator
                 sim = FlagSimulator(
-                    message_passing_num=15,
+                    message_passing_num=ckpt.get("message_passing_num", 15),
                     device=device,
                 )
             else:
                 from model.simulator import Simulator
-                node_input_size = ckpt.get("node_input_size", 11)
-                edge_input_size = ckpt.get("edge_input_size", 3)
-                target_field    = ckpt.get("target_field", "velocity")
-                architecture    = ckpt.get("architecture", "gn")
-                tns_heads       = ckpt.get("tns_heads", 4)
-                sage_aggr       = ckpt.get("sage_aggr", "mean")
-                sage_normalize  = ckpt.get("sage_normalize", True)
+                node_input_size      = ckpt.get("node_input_size", 11)
+                edge_input_size      = ckpt.get("edge_input_size", 3)
+                target_field         = ckpt.get("target_field", "velocity")
+                architecture         = ckpt.get("architecture", "gn")
+                tns_heads            = ckpt.get("tns_heads", 4)
+                sage_aggr            = ckpt.get("sage_aggr", "mean")
+                sage_normalize       = ckpt.get("sage_normalize", True)
                 sim = Simulator(
-                    message_passing_num=15,
+                    message_passing_num=ckpt.get("message_passing_num", 15),
                     node_input_size=node_input_size,
                     edge_input_size=edge_input_size,
                     device=device,

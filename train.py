@@ -53,7 +53,7 @@ if args.config and os.path.exists(args.config):
 # ── Domain defaults ────────────────────────────────────────────────────────────
 _DOMAIN_DEFAULTS = {
     'cylinder_flow': dict(output_size=2, node_input_size=11, edge_input_size=3),
-    'flag_simple':   dict(output_size=3, node_input_size=12, edge_input_size=7),
+    'flag_simple':   dict(output_size=3, node_input_size=12, edge_input_size=7, batch_size=1),
 }
 domain = cfg['domain']
 if domain not in _DOMAIN_DEFAULTS:

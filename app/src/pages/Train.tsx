@@ -28,6 +28,10 @@ export const Train: React.FC = () => {
   const [logPath, setLogPath] = useState<string>('runs/train_ui.log');
   const [copied, setCopied] = useState(false);
   const [arch, setArch] = useState('GNS');
+  const [tnsHeads, setTnsHeads] = useState(4);
+  const [tnsDropout, setTnsDropout] = useState(0.0);
+  const [sageAggr, setSageAggr] = useState<'mean' | 'max' | 'sum'>('mean');
+  const [sageNormalize, setSageNormalize] = useState(true);
   const [remoteActive, setRemoteActive] = useState(false);  // true when training is running on remote GPU
   const [processes, setProcesses] = useState<any[]>([]);
   const [killingPid, setKillingPid] = useState<number | null>(null);
@@ -233,7 +237,15 @@ export const Train: React.FC = () => {
     const res = await fetch('/api/train/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...config, fresh_start: freshStart }),
+      body: JSON.stringify({
+        ...config,
+        fresh_start: freshStart,
+        architecture: arch.toLowerCase(),
+        tns_heads: tnsHeads,
+        tns_dropout: tnsDropout,
+        sage_aggr: sageAggr,
+        sage_normalize: sageNormalize,
+      }),
     });
     if (res.ok) {
       setIsRunning(true);
@@ -333,8 +345,7 @@ export const Train: React.FC = () => {
               </label>
               <button
                 onClick={handleStart}
-                disabled={arch !== 'GNS'}
-                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
+                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
               >
                 <Play className="w-4 h-4 fill-current" />
                 Start Training
@@ -400,23 +411,63 @@ export const Train: React.FC = () => {
               <h3 className="font-semibold text-white text-sm uppercase tracking-wider">Architecture</h3>
             </div>
             <div className="p-6 space-y-4">
-              <div className="space-y-2">
-                <select
-                  value={arch}
-                  onChange={(e) => setArch(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
-                >
-                  <option value="GNS">GNS (Graph Network)</option>
-                  <option value="TNS">TNS (Transformer)</option>
-                  <option value="SER">SER (Shape Encoding)</option>
-                </select>
-                {arch !== 'GNS' && (
-                  <div className="p-3 bg-blue-600/10 border border-blue-500/20 rounded-lg flex items-start gap-2">
-                    <Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
-                    <p className="text-[10px] text-blue-300">Architecture "{arch}" is currently in development. Training is disabled.</p>
+              <select
+                value={arch}
+                onChange={(e) => setArch(e.target.value)}
+                disabled={isRunning}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
+              >
+                <option value="GNS">GNS — Graph Network Simulator</option>
+                <option value="TNS">TNS — Transformer Neural Simulator</option>
+                <option value="SAGE">SAGE — GraphSAGE Processor</option>
+              </select>
+              {/* TNS hyperparameters */}
+              {arch === 'TNS' && (
+                <div className="space-y-3 pt-1">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Attention Heads</label>
+                    <select
+                      value={tnsHeads}
+                      onChange={(e) => setTnsHeads(Number(e.target.value))}
+                      disabled={isRunning}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
+                    >
+                      <option value={2}>2 heads</option>
+                      <option value={4}>4 heads (recommended)</option>
+                      <option value={8}>8 heads</option>
+                    </select>
+                    <p className="text-[9px] text-slate-600">Must divide hidden size (128). More heads = finer attention patterns.</p>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
+              {/* SAGE hyperparameters */}
+              {arch === 'SAGE' && (
+                <div className="space-y-3 pt-1">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Aggregation</label>
+                    <select
+                      value={sageAggr}
+                      onChange={(e) => setSageAggr(e.target.value as 'mean' | 'max' | 'sum')}
+                      disabled={isRunning}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
+                    >
+                      <option value="mean">Mean (recommended)</option>
+                      <option value="max">Max</option>
+                      <option value="sum">Sum</option>
+                    </select>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={sageNormalize}
+                      onChange={(e) => setSageNormalize(e.target.checked)}
+                      disabled={isRunning}
+                      className="accent-blue-500 w-3.5 h-3.5"
+                    />
+                    <span className="text-[10px] text-slate-400">L2 Normalize output</span>
+                  </label>
+                </div>
+              )}
               <div className="overflow-hidden border border-slate-800 rounded-lg">
                 <table className="w-full text-[10px] text-left">
                   <thead className="bg-slate-950 text-slate-500 uppercase font-bold">
@@ -428,8 +479,8 @@ export const Train: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-slate-800 text-slate-400">
                     <tr><td className="px-2 py-1.5 font-bold text-slate-200">GNS</td><td className="px-2 py-1.5">Transient CFD</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
-                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">TNS</td><td className="px-2 py-1.5">Global Physics</td><td className="px-2 py-1.5 text-slate-600">🔒 Soon</td></tr>
-                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">SER</td><td className="px-2 py-1.5">Steady-state</td><td className="px-2 py-1.5 text-slate-600">🔒 Soon</td></tr>
+                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">TNS</td><td className="px-2 py-1.5">Global Physics</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
+                    <tr><td className="px-2 py-1.5 font-bold text-slate-200">SAGE</td><td className="px-2 py-1.5">Large Meshes</td><td className="px-2 py-1.5 text-green-500">✅ Ready</td></tr>
                   </tbody>
                 </table>
               </div>

@@ -21,6 +21,11 @@ class Simulator(nn.Module):
         edge_input_size: int,
         device: str,
         target_field: str = "velocity",
+        architecture: str = "gn",
+        tns_heads: int = 4,
+        tns_dropout: float = 0.0,
+        sage_aggr: str = "mean",
+        sage_normalize: bool = True,
     ) -> None:
         super(Simulator, self).__init__()
 
@@ -30,6 +35,7 @@ class Simulator(nn.Module):
         self.target_field    = target_field
         self.node_input_size = node_input_size
         self.edge_input_size = edge_input_size
+        self.architecture    = architecture
 
         # output_size: 2 for velocity, 1 for pressure
         output_size = 1 if target_field == "pressure" else 2
@@ -39,6 +45,11 @@ class Simulator(nn.Module):
             node_input_size=node_input_size,
             edge_input_size=edge_input_size,
             output_size=output_size,
+            architecture=architecture,
+            tns_heads=tns_heads,
+            tns_dropout=tns_dropout,
+            sage_aggr=sage_aggr,
+            sage_normalize=sage_normalize,
         ).to(device)
 
         self._output_normalizer = normalization.Normalizer(

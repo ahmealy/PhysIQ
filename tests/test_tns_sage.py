@@ -129,3 +129,96 @@ def test_sage_backward_pass():
         if "eb_encoder" in name:
             continue
         assert p.grad is not None, f"No gradient for {name}"
+
+
+# ── Simulator wrapper ─────────────────────────────────────────────────────────
+
+import torch_geometric.transforms as T
+
+
+def _sim_graph(N=30, F=20):
+    """CFD-style graph with faces for transform pipeline."""
+    node_type = torch.zeros(N, 1)
+    vel       = torch.randn(N, 2)
+    x = torch.cat([node_type, vel], dim=-1)
+    face = torch.randint(0, N, (3, F))
+    return Data(x=x, pos=torch.randn(N, 2), face=face, y=torch.randn(N, 2))
+
+
+def _apply_cfd_transforms(graph):
+    tfm = T.Compose([T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)])
+    return tfm(graph)
+
+
+def test_simulator_tns_inference_shape():
+    from model.simulator import Simulator
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        device="cpu", architecture="tns", tns_heads=4,
+    )
+    sim.eval()
+    graph = _apply_cfd_transforms(_sim_graph())
+    with torch.no_grad():
+        out = sim(graph, velocity_sequence_noise=None)
+    assert out.shape == (graph.x.shape[0], 2), f"Expected ({graph.x.shape[0]}, 2) got {out.shape}"
+
+
+def test_simulator_tns_training_shapes():
+    from model.simulator import Simulator
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        device="cpu", architecture="tns", tns_heads=4,
+    )
+    sim.train()
+    graph = _apply_cfd_transforms(_sim_graph())
+    noise = torch.zeros(graph.x.shape[0], 2)
+    pred, tgt = sim(graph, velocity_sequence_noise=noise)
+    N = graph.x.shape[0]
+    assert pred.shape == (N, 2)
+    assert tgt.shape  == (N, 2)
+
+
+def test_simulator_sage_inference_shape():
+    from model.simulator import Simulator
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        device="cpu", architecture="sage",
+    )
+    sim.eval()
+    graph = _apply_cfd_transforms(_sim_graph())
+    with torch.no_grad():
+        out = sim(graph, velocity_sequence_noise=None)
+    assert out.shape == (graph.x.shape[0], 2)
+
+
+def test_simulator_gn_default_unchanged():
+    """Existing callers that don't pass architecture must still work."""
+    from model.simulator import Simulator
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3, device="cpu",
+    )
+    assert sim.architecture == "gn"
+    sim.eval()
+    graph = _apply_cfd_transforms(_sim_graph())
+    with torch.no_grad():
+        out = sim(graph, velocity_sequence_noise=None)
+    assert out.shape == (graph.x.shape[0], 2)
+
+
+def test_simulator_sage_gradient_flows():
+    """Verify gradients reach encoder node-branch weights for SAGE."""
+    from model.simulator import Simulator
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        device="cpu", architecture="sage",
+    )
+    sim.train()
+    graph = _apply_cfd_transforms(_sim_graph())
+    noise = torch.zeros(graph.x.shape[0], 2)
+    pred, tgt = sim(graph, velocity_sequence_noise=noise)
+    loss = (pred - tgt).pow(2).mean()
+    loss.backward()
+    # Check node encoder — it IS in the gradient path for SAGE
+    enc_param = list(sim.model.encoder.nb_encoder.parameters())[0]
+    assert enc_param.grad is not None
+    assert not torch.isnan(enc_param.grad).any()

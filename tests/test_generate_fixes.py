@@ -483,9 +483,10 @@ def test_optimise_best_stress_uses_best_z(tmp_path):
     )
 
     # Set up PCA inverse transform manually with known values
-    components = np.eye(4, 4 * 3, dtype=np.float32)[:4]   # [4, 12]
-    mean       = np.zeros(4 * 3, dtype=np.float32)
-    designer._pca_inv = TorchPCAInverseTransform(components, mean, N=4)
+    # components shape: [latent_dim, N*3] = [4, 30]; mean shape: [N*3] = [30]
+    components = np.eye(4, N * 3, dtype=np.float32)        # [4, 30]
+    mean       = np.zeros(N * 3, dtype=np.float32)
+    designer._pca_inv = TorchPCAInverseTransform(components, mean, N=N)
 
     result = designer.optimise(
         target_stress=1.0,

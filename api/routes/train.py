@@ -16,7 +16,7 @@ from typing import AsyncGenerator, Literal, Optional
 import psutil
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import api.state as state
 
@@ -42,6 +42,13 @@ class TrainConfig(BaseModel):
     tns_dropout:              float = 0.0
     sage_aggr:                str   = "mean"
     sage_normalize:           bool  = True
+
+    @field_validator("architecture", mode="before")
+    @classmethod
+    def _normalise_arch(cls, v: str) -> str:
+        """Accept GNS/TNS/SAGE (UI labels) and map to gn/tns/sage (model keys)."""
+        mapping = {"gns": "gn", "tns": "tns", "sage": "sage", "gn": "gn"}
+        return mapping.get(str(v).lower(), str(v).lower())
 
 
 class RemoteConfig(BaseModel):

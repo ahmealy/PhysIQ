@@ -222,3 +222,72 @@ def test_simulator_sage_gradient_flows():
     enc_param = list(sim.model.encoder.nb_encoder.parameters())[0]
     assert enc_param.grad is not None
     assert not torch.isnan(enc_param.grad).any()
+
+
+# ── Checkpoint round-trip ─────────────────────────────────────────────────────
+
+import tempfile, os
+
+
+def test_checkpoint_saves_architecture():
+    """torch.save dict must include architecture key."""
+    from model.simulator import Simulator
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        device="cpu", architecture="tns", tns_heads=4,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as f:
+        path = f.name
+    try:
+        torch.save({
+            "epoch": 1,
+            "model_state_dict": sim.state_dict(),
+            "optimizer_state_dict": {},
+            "valid_loss": 0.1,
+            "domain": "cylinder_flow",
+            "target_field": "velocity",
+            "output_size": 2,
+            "node_input_size": 11,
+            "edge_input_size": 3,
+            "architecture": sim.architecture,
+        }, path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        assert ckpt.get("architecture") == "tns", \
+            f"Expected 'tns', got {ckpt.get('architecture')!r}"
+    finally:
+        os.unlink(path)
+
+
+def test_get_model_loads_tns_architecture(tmp_path):
+    """get_model() must reconstruct a TNS Simulator from checkpoint."""
+    from model.simulator import Simulator
+    from api.state import get_model, clear_model_cache
+
+    sim = Simulator(
+        message_passing_num=2, node_input_size=11, edge_input_size=3,
+        device="cpu", architecture="tns", tns_heads=4,
+    )
+    ckpt_path = str(tmp_path / "tns_test.pth")
+    torch.save({
+        "epoch": 1,
+        "model_state_dict": sim.state_dict(),
+        "optimizer_state_dict": {},
+        "valid_loss": 0.1,
+        "domain": "cylinder_flow",
+        "target_field": "velocity",
+        "output_size": 2,
+        "node_input_size": 11,
+        "edge_input_size": 3,
+        "architecture": "tns",
+        "tns_heads": 4,
+    }, ckpt_path)
+
+    clear_model_cache()
+    loaded = get_model(ckpt_path, "cpu")
+    assert loaded.architecture == "tns", \
+        f"Expected 'tns', got {loaded.architecture!r}"
+    # Verify it's actually a TNS model by checking processer block type
+    from model.model import TNSBlock
+    assert isinstance(loaded.model.processer_list[0], TNSBlock), \
+        "First processor block should be TNSBlock"
+    clear_model_cache()

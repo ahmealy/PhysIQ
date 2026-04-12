@@ -32,6 +32,11 @@ _defaults = dict(
     output_size              = None,   # set automatically from domain: 2 (cylinder_flow) or 3 (flag_simple)
     node_input_size          = None,   # 11 = CFD velocity, 12 = cloth
     edge_input_size          = None,   # 3 = CFD, 7 = cloth
+    architecture             = 'gn',
+    tns_heads                = 4,
+    tns_dropout              = 0.0,
+    sage_aggr                = 'mean',
+    sage_normalize           = True,
 )
 
 parser = argparse.ArgumentParser()
@@ -89,6 +94,7 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 
 # 初始化模型与优化器
+architecture = cfg.get('architecture', 'gn')   # module-level, used in load_checkpoint guard
 if domain == 'flag_simple':
     from model.flag_simulator import FlagSimulator
     simulator = FlagSimulator(
@@ -98,12 +104,18 @@ if domain == 'flag_simple':
     transformer = None  # FlagSimulator builds edges internally
 else:
     from model.simulator import Simulator
+    architecture = cfg.get('architecture', 'gn')
     simulator = Simulator(
         message_passing_num=cfg['message_passing_num'],
         node_input_size=node_input_size,
         edge_input_size=edge_input_size,
         device=device,
         target_field=target_field,
+        architecture=architecture,
+        tns_heads=cfg.get('tns_heads', 4),
+        tns_dropout=cfg.get('tns_dropout', 0.0),
+        sage_aggr=cfg.get('sage_aggr', 'mean'),
+        sage_normalize=cfg.get('sage_normalize', True),
     )
     transformer = T.Compose([
         T.FaceToEdge(),
@@ -134,6 +146,12 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
         raise RuntimeError(
             f"Checkpoint target_field '{ckpt_target_field}' does not match current "
             f"target_field '{target_field}'. Delete the checkpoint or update --config."
+        )
+    ckpt_architecture = ckpt.get('architecture', 'gn')
+    if ckpt_architecture != architecture:
+        raise RuntimeError(
+            f"Checkpoint architecture '{ckpt_architecture}' does not match current "
+            f"architecture '{architecture}'. Delete the checkpoint or update --config."
         )
     model.load_state_dict(ckpt['model_state_dict'])
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
@@ -264,6 +282,8 @@ if __name__ == '__main__':
                 'output_size':          output_size,
                 'node_input_size':      node_input_size,
                 'edge_input_size':      edge_input_size,
+                'architecture':         architecture,
+                'tns_heads':            cfg.get('tns_heads', 4),
             }, checkpoint_path)
             print(f"  -> New best model saved at epoch {epoch} with valid loss {valid_loss:.2e}")
         else:
@@ -295,7 +315,8 @@ if __name__ == '__main__':
             embeddings_arr = np.stack(embeddings)   # [N_train, 128]
             index = NearestNeighborIndex()
             index.build(embeddings_arr)
-            index_path = os.path.join(log_dir, 'embedding_index.pkl')
+            index_slug = domain.replace("_", "")  # cylinderflow, flagsimple
+            index_path = os.path.join(log_dir, f'embedding_index_{index_slug}.pkl')
             index.save(index_path)
             print("Confidence index saved to %s (backend: %s, diameter: %.4f, N=%d)" % (
                 index_path, index.backend, index.train_diameter, len(embeddings)))

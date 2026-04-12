@@ -4,9 +4,11 @@ from torch_geometric.data import Data
 from torch_geometric.nn import TransformerConv, SAGEConv
 
 def build_mlp(in_size, hidden_size, out_size, lay_norm=True):
-    # 2 hidden layers — matches DeepMind MeshGraphNets (num_layers=2, latent_size=128)
+    # 3 hidden layers — matches the trained checkpoint architecture
+    # (encoder: in→128→128→128, processor: in→128→128→128, decoder: 128→128→128→out)
     module = nn.Sequential(
         nn.Linear(in_size,     hidden_size), nn.ReLU(),
+        nn.Linear(hidden_size, hidden_size), nn.ReLU(),
         nn.Linear(hidden_size, hidden_size), nn.ReLU(),
         nn.Linear(hidden_size, out_size)
     )

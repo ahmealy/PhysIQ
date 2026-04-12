@@ -168,26 +168,7 @@ def get_model(checkpoint_path: str, device: str):
                     sage_normalize=sage_normalize,
                 )
 
-            # Filter checkpoint keys to only those that match the current model's
-            # name and shape. This handles checkpoints saved with an older/deeper
-            # architecture (e.g. 4-layer MLP decoder vs the current 3-layer one).
-            # The decoder is not used for rollout (only encoder + processor are),
-            # so skipping mismatched decoder keys is safe.
-            import logging as _logging
-            ckpt_sd    = ckpt["model_state_dict"]
-            current_sd = sim.state_dict()
-            filtered   = {
-                k: v for k, v in ckpt_sd.items()
-                if k in current_sd and current_sd[k].shape == v.shape
-            }
-            skipped = [k for k in ckpt_sd if k not in filtered]
-            if skipped:
-                _logging.getLogger(__name__).warning(
-                    "get_model: skipping %d checkpoint keys with shape/name mismatch "
-                    "(likely older deeper architecture): %s%s",
-                    len(skipped), skipped[:3], " ..." if len(skipped) > 3 else "",
-                )
-            sim.load_state_dict(filtered, strict=False)
+            sim.load_state_dict(ckpt["model_state_dict"])
             sim.eval()
             _model_cache[key] = sim
     return _model_cache[key]

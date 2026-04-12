@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './pages/Dashboard';
 import { Train } from './pages/Train';
@@ -7,7 +7,6 @@ import { Predict } from './pages/Predict';
 import { Visualize } from './pages/Visualize';
 import { DatasetStudio } from './pages/DatasetStudio';
 import { PipelineView } from './pages/PipelineView';
-import { ExperimentTracking } from './pages/ExperimentTracking';
 import { Generate } from './pages/Generate';
 
 export default function App() {
@@ -24,7 +23,7 @@ export default function App() {
             <Route path="/generate" element={<Generate />} />
             <Route path="/dataset" element={<DatasetStudio />} />
             <Route path="/pipeline" element={<PipelineView />} />
-            <Route path="/experiments" element={<ExperimentTracking />} />
+            <Route path="/experiments" element={<Navigate to="/pipeline" replace />} />
           </Routes>
         </main>
       </div>

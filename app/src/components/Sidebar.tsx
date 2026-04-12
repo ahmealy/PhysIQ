@@ -1,17 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Activity, PlayCircle, BarChart3, Settings, Database, History, Cpu, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Activity, PlayCircle, BarChart3, Database, Cpu, Sparkles, FlaskConical } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 
 const navItems = [
-  { icon: LayoutDashboard, label: 'Dashboard',     path: '/' },
-  { icon: Activity,        label: 'Train',         path: '/train' },
-  { icon: PlayCircle,      label: 'Predict',       path: '/predict' },
-  { icon: BarChart3,       label: 'Visualize',     path: '/visualize' },
-  { icon: Sparkles,        label: 'Generate',      path: '/generate' },
-  { icon: Database,        label: 'Dataset Studio',path: '/dataset' },
-  { icon: Settings,        label: 'Pipeline View', path: '/pipeline' },
-  { icon: History,         label: 'Experiments',   path: '/experiments' },
+  { icon: LayoutDashboard, label: 'Dashboard',            path: '/' },
+  { icon: Database,        label: 'Dataset Studio',       path: '/dataset' },
+  { icon: Activity,        label: 'Train',                path: '/train' },
+  { icon: PlayCircle,      label: 'Predict',              path: '/predict' },
+  { icon: BarChart3,       label: 'Visualize',            path: '/visualize' },
+  { icon: Sparkles,        label: 'Generate',             path: '/generate' },
+  { icon: FlaskConical,    label: 'Pipeline & Experiments', path: '/pipeline' },
 ];
 
 export const Sidebar: React.FC = () => {

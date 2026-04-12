@@ -181,7 +181,7 @@ export const Train: React.FC = () => {
     fetch('/api/train/remote')
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (d) { setRemote(d); setRemoteEnabled(!!d.enabled && !!d.host); }
+        if (d) { setRemote(d); setRemoteEnabled(!!d.enabled); }
       }).catch(() => {});
 
     // Full train status for epoch history and best checkpoint

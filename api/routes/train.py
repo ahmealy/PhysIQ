@@ -56,16 +56,23 @@ class RemoteConfig(BaseModel):
 _SSH_CFG_PATH = "runs/remote_gpu.json"
 
 def _load_remote_cfg() -> Optional[dict]:
+    """Load remote GPU config from disk.  Returns the dict as-is (even if
+    enabled=False or host is empty) so callers can display saved settings.
+    Returns None only when the file doesn't exist or is unparseable.
+    The caller is responsible for checking enabled+host before using SSH."""
     if not os.path.exists(_SSH_CFG_PATH):
         return None
     try:
         with open(_SSH_CFG_PATH) as f:
             d = json.load(f)
-        if not d.get("enabled") or not d.get("host"):
-            return None
         return d
     except Exception:
         return None
+
+
+def _remote_ssh_active(cfg: Optional[dict]) -> bool:
+    """Return True only when the config is present, enabled, and has a host."""
+    return bool(cfg and cfg.get("enabled") and cfg.get("host", "").strip())
 
 def _save_remote_cfg(cfg: Optional[dict]) -> None:
     os.makedirs("runs", exist_ok=True)
@@ -311,7 +318,7 @@ def train_start(config: TrainConfig):
     log_file = open(state.train_log_path, "w")
 
     remote_cfg = _load_remote_cfg()
-    if remote_cfg:
+    if _remote_ssh_active(remote_cfg):
         # ── Remote GPU execution over SSH ─────────────────────────────────────
         venv_py    = remote_cfg.get("venv_python", "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python").strip()
         cfg_abs    = os.path.join(project_root, cfg_path)
@@ -350,7 +357,7 @@ def train_start(config: TrainConfig):
         cmd = [python_bin, "-u", "train.py", "--config", cfg_path]
         execution = "local"
 
-    if remote_cfg:
+    if _remote_ssh_active(remote_cfg):
         # SSH exits immediately (nohup &); capture remote PID from stdout
         proc = subprocess.Popen(
             cmd,
@@ -408,7 +415,7 @@ def train_stop():
                 pass
         if is_remote:
             remote_cfg = _load_remote_cfg()
-            if remote_cfg:
+            if _remote_ssh_active(remote_cfg):
                 try:
                     ssh_prefix = _build_ssh_prefix(remote_cfg)
                     subprocess.run(
@@ -576,8 +583,8 @@ def kill_process(pid: int):
 
     if is_remote:
         remote_cfg = _load_remote_cfg()
-        if not remote_cfg:
-            raise HTTPException(500, "Remote config not found — cannot SSH-kill")
+        if not _remote_ssh_active(remote_cfg):
+            raise HTTPException(500, "Remote config not found or not enabled — cannot SSH-kill")
         ssh_prefix = _build_ssh_prefix(remote_cfg)
         kill_cmd = ssh_prefix + [f"kill -TERM {pid} 2>/dev/null || kill -KILL {pid} 2>/dev/null; echo done"]
         try:
@@ -647,8 +654,9 @@ async def train_status():
             pass
 
     remote_cfg = _load_remote_cfg()
+    ssh_active = _remote_ssh_active(remote_cfg)
     device_label = "LOCAL CPU"
-    if remote_cfg:
+    if ssh_active:
         host = remote_cfg.get("host", "remote")
         device_label = f"REMOTE GPU ({host})"
     return {
@@ -657,7 +665,7 @@ async def train_status():
         "epochs":          epochs,
         "best_epoch":      best["epoch"]      if best else None,
         "best_valid_loss": best["valid_loss"] if best else None,
-        "remote":          remote_cfg is not None,
+        "remote":          ssh_active,
         "device":          device_label,
         # Accurate training start time (ms since epoch) so the frontend shows correct elapsed.
         # Prefer the persisted start-time file written at launch; fall back to log ctime.

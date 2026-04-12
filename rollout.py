@@ -158,16 +158,21 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
             graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
             graph.prev_x    = prev_world.detach()
 
+        # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py which
+        # writes cur_pos (the input) to the trajectory, not the prediction.
+        # trajectory[t] = position fed as input at step t (= prediction from step t-1)
+        predicteds.append(graph.world_pos.detach().cpu().numpy())
+        targets_list.append(graph.y.detach().cpu().numpy())
+
         prev_world = graph.world_pos.clone()
         next_world = model(graph)   # [N, 3]
 
-        # Pin HANDLE nodes to ground truth
+        # Pin HANDLE nodes to cur_pos — matches DeepMind: next_pos = where(NORMAL, pred, cur_pos)
+        # Using cur_pos (not GT) keeps the rollout fully autoregressive for all nodes.
         node_type = graph.x[:, 3].long()
-        handle_mask = (node_type == NodeType.HANDLE)
-        next_world[handle_mask] = graph.y[handle_mask]
+        handle_mask = (node_type != NodeType.NORMAL)
+        next_world[handle_mask] = graph.world_pos[handle_mask]
 
-        predicteds.append(next_world.detach().cpu().numpy())
-        targets_list.append(graph.y.detach().cpu().numpy())
         cur_world = next_world
 
     elapsed = time.perf_counter() - t_start

@@ -248,15 +248,18 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
                 graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
                 graph.prev_x    = prev_world.detach()
 
+            # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py
+            predicteds.append(graph.world_pos.detach().cpu().numpy())
+            targets_list.append(graph.y.detach().cpu().numpy())
+
             prev_world = graph.world_pos.clone()
             next_world = model(graph)  # [N, 3]
 
+            # Pin HANDLE nodes to cur_pos (fully autoregressive, matches DeepMind)
             node_type = graph.x[:, 3].long()
-            handle_mask = (node_type == NodeType.HANDLE)
-            next_world[handle_mask] = graph.y[handle_mask]
+            handle_mask = (node_type != NodeType.NORMAL)
+            next_world[handle_mask] = graph.world_pos[handle_mask]
 
-            predicteds.append(next_world.detach().cpu().numpy())
-            targets_list.append(graph.y.detach().cpu().numpy())
             cur_world = next_world
 
             if i % 20 == 0 or i == n_steps - 1:

@@ -270,8 +270,8 @@ export const Train: React.FC = () => {
     }
   };
 
-  const handleSaveRemote = async () => {
-    const cfg = { ...remote, enabled: remoteEnabled };
+  const handleSaveRemote = async (overrideCfg?: typeof remote) => {
+    const cfg = { ...(overrideCfg ?? remote), enabled: remoteEnabled };
     await fetch('/api/train/remote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -533,6 +533,7 @@ export const Train: React.FC = () => {
                 <input
                   value={remote.host}
                   onChange={e => setRemote(r => ({ ...r, host: e.target.value }))}
+                  onBlur={e => handleSaveRemote({ ...remote, host: e.target.value })}
                   placeholder="dvt-gpubig1.wv.mentorg.com"
                   disabled={isRunning}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
@@ -545,6 +546,7 @@ export const Train: React.FC = () => {
                     type="number"
                     value={remote.port}
                     onChange={e => setRemote(r => ({ ...r, port: parseInt(e.target.value) || 22 }))}
+                    onBlur={e => handleSaveRemote({ ...remote, port: parseInt(e.target.value) || 22 })}
                     disabled={isRunning}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
                   />
@@ -554,6 +556,7 @@ export const Train: React.FC = () => {
                   <input
                     value={remote.user}
                     onChange={e => setRemote(r => ({ ...r, user: e.target.value }))}
+                    onBlur={e => handleSaveRemote({ ...remote, user: e.target.value })}
                     placeholder="ahmealy"
                     disabled={isRunning}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
@@ -565,6 +568,7 @@ export const Train: React.FC = () => {
                 <input
                   value={remote.venv_python}
                   onChange={e => setRemote(r => ({ ...r, venv_python: e.target.value }))}
+                  onBlur={e => handleSaveRemote({ ...remote, venv_python: e.target.value })}
                   placeholder="/home/ahmealy/.pyenv/versions/venv_gpu/bin/python"
                   disabled={isRunning}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/50 font-mono disabled:opacity-50"

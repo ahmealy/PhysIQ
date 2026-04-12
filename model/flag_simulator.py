@@ -40,6 +40,9 @@ class FlagSimulator(nn.Module):
     edge_input_size: int = 7
     output_size:     int = 3
 
+    # noise_gamma matches DeepMind run_model.py cloth config
+    _noise_gamma: float = 0.1
+
     def __init__(self, message_passing_num: int = 15, device: str = "cpu") -> None:
         super(FlagSimulator, self).__init__()
 
@@ -146,6 +149,11 @@ class FlagSimulator(nn.Module):
 
         if self.training:
             target_world    = graph.y
+            # DeepMind target correction: target|world_pos += (1 - noise_gamma) * noise
+            # This adjusts the Verlet target to account for the noised world_pos input,
+            # preventing the model from learning to "undo" noise instead of physics.
+            if velocity_sequence_noise is not None:
+                target_world = target_world + (1.0 - self._noise_gamma) * velocity_sequence_noise
             target_acc      = target_world - 2.0 * world_pos + prev_world  # Verlet
             target_acc_norm = self._output_normalizer(target_acc, self.training)
             return predicted_acc_norm, target_acc_norm

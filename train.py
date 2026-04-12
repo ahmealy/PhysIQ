@@ -191,8 +191,14 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
         graph = graph.to(device)
 
         if domain == 'flag_simple':
-            # Cloth noise (DeepMind: σ=0.003 on velocity component of node features)
+            # Cloth noise — matches DeepMind dataset.py exactly:
+            # 1. Sample [N,3] noise with σ=0.003
+            # 2. Zero-mask on non-NORMAL nodes (HANDLE nodes stay fixed)
+            # 3. Pass masked noise to model so target can be adjusted by (1-γ)*noise
+            node_type_cloth = graph.x[:, 3].long()   # col-3 = node_type for cloth
             velocity_noise = torch.randn(graph.x.shape[0], 3, device=device) * noise_std_cloth
+            normal_mask = (node_type_cloth == NodeType.NORMAL).unsqueeze(-1)  # [N,1]
+            velocity_noise = torch.where(normal_mask, velocity_noise, torch.zeros_like(velocity_noise))
             predicted_acc, target_acc = model(graph, velocity_sequence_noise=velocity_noise)
             # Cloth: loss on NORMAL nodes only
             # DeepMind formula: mean_over_nodes( sum_over_xyz( err² ) )

@@ -28,6 +28,15 @@ from utils.utils import NodeType
 
 router = APIRouter()
 
+# ── In-progress rollout state (for frontend reconnect on page refresh) ────────
+_rollout_state: dict = {
+    "running":           False,
+    "domain":            None,
+    "trajectory_index":  None,
+    "step":              0,
+    "total":             0,
+}
+
 # Cache dataset objects so we don't reload on every rollout request
 _dataset_cache: dict = {}
 
@@ -162,9 +171,10 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
             ref_arr.max(axis=0) - ref_arr.min(axis=0))) + 1e-12
         similarity_score = float(np.clip(1.0 - d_min / d_max, -0.5, 1.0))
 
-    # Confidence score — requires embedding_index.pkl built after training
+    # Confidence score — requires domain-scoped embedding_index built after training
     confidence_score = None
-    index_path = os.path.join("runs", "embedding_index.pkl")
+    _domain_slug = req.domain.replace("_", "")  # cylinderflow, flagsimple
+    index_path = os.path.join("runs", f"embedding_index_{_domain_slug}.pkl")
     if os.path.exists(index_path):
         try:
             from confidence.index import NearestNeighborIndex
@@ -258,9 +268,9 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     sq = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
     per_step_rmse = np.sqrt(np.mean(sq, axis=1))
 
-    # Confidence score — requires embedding_index.pkl built after training
+    # Confidence score — requires domain-scoped embedding_index built after training
     confidence_score = None
-    index_path = os.path.join("runs", "embedding_index.pkl")
+    index_path = os.path.join("runs", "embedding_index_flagsimple.pkl")
     if os.path.exists(index_path):
         try:
             from confidence.index import NearestNeighborIndex
@@ -296,6 +306,12 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     }
 
 
+@router.get("/rollout/status")
+async def get_rollout_status():
+    """Return current rollout state for frontend reconnect on page refresh."""
+    return _rollout_state.copy()
+
+
 @router.post("/rollout")
 async def run_rollout(req: RolloutRequest):
     """
@@ -316,6 +332,15 @@ async def run_rollout(req: RolloutRequest):
 
     if not os.path.exists(cfg["checkpoint"]):
         raise HTTPException(404, "No checkpoint at %s. Train first." % cfg["checkpoint"])
+
+    # Track rollout state for frontend reconnect
+    _rollout_state.update({
+        "running":          True,
+        "domain":           req.domain,
+        "trajectory_index": req.trajectory_index,
+        "step":             0,
+        "total":            0,
+    })
 
     # ── Remote GPU path ───────────────────────────────────────────────────────
     remote_cfg = _load_remote_cfg()
@@ -387,6 +412,7 @@ async def run_rollout(req: RolloutRequest):
             finally:
                 proc.stdout.close()
                 proc.wait()
+                _rollout_state["running"] = False
 
         return StreamingResponse(
             generate_ssh(),
@@ -411,6 +437,7 @@ async def run_rollout(req: RolloutRequest):
             "step":  step,
             "total": total,
         })
+        _rollout_state.update({"running": True, "step": step, "total": total})
 
     async def generate() -> AsyncGenerator[str, None]:
         try:
@@ -438,12 +465,14 @@ async def run_rollout(req: RolloutRequest):
             # Get the final result (raises if the thread raised)
             result = await future
             yield "data: %s\n\n" % json.dumps({"type": "done", **result})
+            _rollout_state["running"] = False
 
         except Exception as e:
             yield "data: %s\n\n" % json.dumps({
                 "type":    "error",
                 "message": str(e),
             })
+            _rollout_state["running"] = False
 
     return StreamingResponse(
         generate(),

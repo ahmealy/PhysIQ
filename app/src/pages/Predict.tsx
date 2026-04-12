@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Loader2, CheckCircle2, ArrowRight, History, Database, Info, Cpu, Server } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 export const Predict: React.FC = () => {
   const [datasetInfo, setDatasetInfo] = useState<any>(null);
   const [status, setStatus] = useState<any>(null);
   const [results, setResults] = useState<any[]>([]);
-  const [domain, setDomain] = useState('cylinder_flow');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [domain, setDomain] = useState(() => searchParams.get('domain') || 'cylinder_flow');
   const [checkpoint, setCheckpoint] = useState<any>(null);
   const [checkpointLoading, setCheckpointLoading] = useState(false);
-  const [trajectoryIndex, setTrajectoryIndex] = useState(0);
+  const [trajectoryIndex, setTrajectoryIndex] = useState(() => parseInt(searchParams.get('traj') || '0', 10));
   const [device, setDevice] = useState('cpu');
   const [isRunning, setIsRunning] = useState(false);
   const [statusLoaded, setStatusLoaded] = useState(false);
@@ -20,6 +21,13 @@ export const Predict: React.FC = () => {
   const [gpuStatus, setGpuStatus] = useState<any>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [remoteConfig, setRemoteConfig] = useState<{ enabled: boolean; host: string } | null>(null);
+  // Rollout phase — persists after completion so status bar stays visible
+  const [rolloutPhase, setRolloutPhase] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  // Elapsed timer for active rollout
+  const [rolloutStartMs, setRolloutStartMs] = useState<number | null>(null);
+  const [rolloutElapsed, setRolloutElapsed] = useState(0);
+  // Reconnect polling — if server has a rollout running on refresh
+  const [reconnectPolling, setReconnectPolling] = useState(false);
   // Keep isRunning in a ref so the fetch loop sees the latest value after navigation
   const isRunningRef = useRef(false);
   const navigate = useNavigate();
@@ -36,12 +44,44 @@ export const Predict: React.FC = () => {
     }).catch(() => setStatusLoaded(true));
 
     fetch('/api/dataset/info').then(r => r.json()).then(setDatasetInfo).catch(() => {});
-    fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
+    fetch('/api/results').then(r => r.json()).then(data => {
+      setResults(data);
+      // Restore last rollout result from sessionStorage if pkl still on disk
+      try {
+        const saved = sessionStorage.getItem('predict_last_result');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          const pkFile = parsed.pkl_path?.split('/').pop();
+          if (pkFile && data.some((r: any) => r.filename === pkFile)) {
+            setRolloutResult(parsed);
+            setProgressStep(parsed._progressStep ?? 0);
+            setProgressTotal(parsed._progressTotal ?? 0);
+            setRolloutPhase('done');
+            setProgress(100);
+          }
+        }
+      } catch { /* ignore */ }
+    }).catch(() => {});
     fetch('/api/status/gpu').then(r => r.json()).then(setGpuStatus).catch(() => {});
     fetch('/api/train/remote').then(r => r.ok ? r.json() : null).then(d => {
       if (d && d.enabled && d.host) {
         setRemoteConfig(d);
         setDevice('cuda:0');  // remote host always has GPU — default to it
+      }
+    }).catch(() => {});
+    // Check if a rollout is currently running on the server (reconnect on refresh)
+    fetch('/api/rollout/status').then(r => r.json()).then(rs => {
+      if (rs.running) {
+        setDomain(rs.domain ?? 'cylinder_flow');
+        setTrajectoryIndex(rs.trajectory_index ?? 0);
+        setIsRunning(true);
+        isRunningRef.current = true;
+        setRolloutPhase('running');
+        setRolloutStartMs(Date.now()); // approximate — we don't know exact start
+        setProgress(rs.total > 0 ? (rs.step / rs.total) * 100 : 0);
+        setProgressStep(rs.step);
+        setProgressTotal(rs.total);
+        setReconnectPolling(true);
       }
     }).catch(() => {});
   }, []);
@@ -61,6 +101,50 @@ export const Predict: React.FC = () => {
       .catch(() => {});
   }, [domain]);
 
+  // Keep URL in sync with domain + traj selections
+  useEffect(() => {
+    setSearchParams({ domain, traj: String(trajectoryIndex) }, { replace: true });
+  }, [domain, trajectoryIndex, setSearchParams]);
+
+  // Tick elapsed counter while rollout is running
+  useEffect(() => {
+    if (rolloutPhase !== 'running' || rolloutStartMs === null) return;
+    const t = setInterval(() => setRolloutElapsed(Math.floor((Date.now() - rolloutStartMs) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [rolloutPhase, rolloutStartMs]);
+
+  // Reconnect polling — if backend has a rollout running on page refresh
+  useEffect(() => {
+    if (!reconnectPolling) return;
+    const poll = async () => {
+      try {
+        const rs = await fetch('/api/rollout/status').then(r => r.json());
+        if (rs.running) {
+          setProgress(rs.total > 0 ? (rs.step / rs.total) * 100 : 0);
+          setProgressStep(rs.step);
+          setProgressTotal(rs.total);
+        } else {
+          // Rollout finished while we were polling
+          setReconnectPolling(false);
+          setIsRunning(false);
+          isRunningRef.current = false;
+          setRolloutPhase('done');
+          setProgress(100);
+          // Reload results list so the new pkl appears
+          fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
+        }
+      } catch {
+        setReconnectPolling(false);
+        setIsRunning(false);
+        isRunningRef.current = false;
+        setRolloutPhase('error');
+      }
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => clearInterval(t);
+  }, [reconnectPolling]);
+
   const similarityScore = rolloutResult?.similarity_score ?? null;
 
   const handleStartRollout = async () => {
@@ -72,6 +156,10 @@ export const Predict: React.FC = () => {
     setProgressTotal(0);
     setRolloutResult(null);
     setErrorMsg(null);
+    setRolloutPhase('running');
+    setRolloutStartMs(Date.now());
+    setRolloutElapsed(0);
+    sessionStorage.removeItem('predict_last_result');
 
     try {
       const response = await fetch('/api/rollout', {
@@ -110,14 +198,19 @@ export const Predict: React.FC = () => {
               setProgressTotal(data.total);
               setProgress((data.step / data.total) * 100);
             } else if (data.type === 'done') {
-              setRolloutResult(data);
+              const doneData = { ...data, _progressStep: progressStep, _progressTotal: progressTotal };
+              setRolloutResult(doneData);
               setIsRunning(false);
               isRunningRef.current = false;
+              setRolloutPhase('done');
+              setProgress(100);
+              try { sessionStorage.setItem('predict_last_result', JSON.stringify(doneData)); } catch { /* ignore */ }
               fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
             } else if (data.type === 'error') {
               setErrorMsg(data.message);
               setIsRunning(false);
               isRunningRef.current = false;
+              setRolloutPhase('error');
             }
           } catch {
             // ignore malformed SSE lines
@@ -127,6 +220,7 @@ export const Predict: React.FC = () => {
     } catch (err: any) {
       setIsRunning(false);
       isRunningRef.current = false;
+      setRolloutPhase('error');
       setErrorMsg(`Rollout failed: ${err.message}`);
     }
   };
@@ -319,24 +413,52 @@ export const Predict: React.FC = () => {
             </div>
           </section>
 
-          {/* Progress bar */}
-          {isRunning && (
-            <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
-              <div className="flex justify-between text-sm">
-                <span className="text-slate-400">Progress</span>
-                <span className="text-blue-400 font-mono">
-                  {progressTotal > 0 ? `${progressStep} / ${progressTotal}` : `${Math.round(progress)}%`}
+          {/* Progress bar — sticky: stays visible after completion */}
+          {rolloutPhase !== 'idle' && (
+            <section className={cn(
+              "border rounded-2xl p-6 space-y-4",
+              rolloutPhase === 'done' ? "bg-green-900/10 border-green-500/20" :
+              rolloutPhase === 'error' ? "bg-red-900/10 border-red-500/20" :
+              "bg-slate-900/50 border-slate-800"
+            )}>
+              <div className="flex justify-between text-sm items-center">
+                <span className="text-slate-400">
+                  {rolloutPhase === 'running' ? 'Progress' : rolloutPhase === 'done' ? '✓ Complete' : '✗ Failed'}
                 </span>
+                <div className="flex items-center gap-3">
+                  {rolloutPhase === 'running' && (
+                    <span className="text-[10px] text-slate-500 font-mono">{rolloutElapsed}s elapsed</span>
+                  )}
+                  <span className={cn(
+                    "font-mono text-sm",
+                    rolloutPhase === 'done' ? "text-green-400" :
+                    rolloutPhase === 'error' ? "text-red-400" : "text-blue-400"
+                  )}>
+                    {progressTotal > 0 ? `${progressStep} / ${progressTotal}` : `${Math.round(progress)}%`}
+                  </span>
+                </div>
               </div>
               <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
                 <div
-                  className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                  className={cn(
+                    "h-full transition-all duration-300 ease-out",
+                    rolloutPhase === 'done' ? "bg-green-500" :
+                    rolloutPhase === 'error' ? "bg-red-500" : "bg-blue-600"
+                  )}
                   style={{ width: `${progress}%` }}
                 />
               </div>
-              <p className="text-[10px] text-slate-500 text-center uppercase tracking-widest animate-pulse">
-                Autoregressive inference in progress
+              <p className={cn(
+                "text-[10px] text-center uppercase tracking-widest",
+                rolloutPhase === 'running' ? "text-slate-500 animate-pulse" :
+                rolloutPhase === 'done' ? "text-green-500" : "text-red-500"
+              )}>
+                {rolloutPhase === 'running' ? 'Autoregressive inference in progress' :
+                 rolloutPhase === 'done' ? 'Rollout complete' : 'Rollout failed'}
               </p>
+              {(reconnectPolling) && (
+                <p className="text-[10px] text-blue-400 text-center">Reconnected to running rollout — polling for updates…</p>
+              )}
             </section>
           )}
 

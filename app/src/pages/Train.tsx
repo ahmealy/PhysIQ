@@ -6,10 +6,11 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 export const Train: React.FC = () => {
   const [searchParams] = useSearchParams();
   const [domains, setDomains] = useState<Record<string, any>>({});
+  const _initDomain = searchParams.get('domain') || 'cylinder_flow';
   const [config, setConfig] = useState({
-    domain: searchParams.get('domain') || 'cylinder_flow',
+    domain: _initDomain,
     epochs: 100,
-    batch_size: 20,
+    batch_size: _initDomain === 'flag_simple' ? 1 : 20,
     lr: 0.0001,
     noise_std: 0.02,
     early_stopping_patience: 10,
@@ -367,7 +368,7 @@ export const Train: React.FC = () => {
             <div className="p-6 space-y-3">
               <select
                 value={config.domain}
-                onChange={(e) => setConfig({ ...config, domain: e.target.value, target_field: 'velocity' })}
+                onChange={(e) => setConfig({ ...config, domain: e.target.value, target_field: 'velocity', batch_size: e.target.value === 'flag_simple' ? 1 : 20 })}
                 disabled={isRunning}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
               >

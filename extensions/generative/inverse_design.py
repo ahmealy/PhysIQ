@@ -229,11 +229,19 @@ class ClothInverseDesigner:
 
         return self._pca_inv(pose_phys.squeeze(0))  # [N, 3]
 
-    def _build_data_from_pos(self, world_pos: torch.Tensor) -> Data:
+    def _build_data_from_pos(self, world_pos: torch.Tensor,
+                              prev_x: Optional[torch.Tensor] = None) -> Data:
         """Build a FlagSimulator-compatible Data from world_pos (non-differentiable scaffold).
 
         Reference topology (mesh_pos, node_type, cells) is cached after the first
         load so disk I/O happens at most once per optimiser instance.
+
+        Args:
+            world_pos: [N, 3] current cloth positions (grad-enabled)
+            prev_x:    [N, 3] previous-timestep positions for velocity computation.
+                       Defaults to ``world_pos.clone()`` (rest / zero-velocity) when
+                       not supplied.  Must NOT be detached so gradients flow through
+                       the velocity term ``delta_pos = world_pos - prev_x``.
         """
         from extensions.generative.mesh_generator import ClothMeshBuilder
         if self._ref_cache is None:
@@ -247,15 +255,19 @@ class ClothInverseDesigner:
         nt    = self._ref_cache["nt"]
         cells = self._ref_cache["cells"]
 
-        wp_np    = world_pos.detach().cpu().numpy()
         nt_t     = torch.from_numpy(nt).to(self._device)
         mp_t     = torch.from_numpy(mp).to(self._device)
         face_t   = torch.from_numpy(cells.T).to(self._device)
 
+        # When prev_x is not provided (first step / rest state) clone world_pos.
+        # Do NOT detach — gradient must flow through the velocity difference.
+        if prev_x is None:
+            prev_x = world_pos.clone()
+
         x        = torch.cat([world_pos, nt_t], dim=-1)   # [N, 4]  ← grad flows
         graph    = Data(
             x          = x,
-            prev_x     = world_pos.detach().clone(),
+            prev_x     = prev_x,
             pos        = mp_t,
             world_pos  = world_pos,
             face       = face_t,
@@ -313,11 +325,22 @@ class ClothInverseDesigner:
                 optim.zero_grad()
 
                 world_pos = self._decode_pose(z, target_norm)   # [N, 3]
-                graph     = self._build_data_from_pos(world_pos)
 
-                # FlagSimulator eval forward returns next_world_pos
-                next_pos  = self._simulator(graph)               # [N, 3]
-                loss      = self._objective(next_pos)
+                # K=5 full BPTT rollout — gradient flows through all steps back to z.
+                # Running multiple steps lets the cloth reach a recognisable deformed
+                # state so the stress signal and its gradients are meaningful.
+                K           = 5
+                current_pos = world_pos          # differentiable w.r.t. z
+                prev_pos    = world_pos.clone()  # rest / zero-velocity initial state
+
+                for k in range(K):
+                    graph_k     = self._build_data_from_pos(current_pos, prev_pos)
+                    next_pos_k  = self._simulator(graph_k)       # [N, 3]
+                    prev_pos    = current_pos   # keep gradient chain — no detach
+                    current_pos = next_pos_k
+
+                # Evaluate stress objective on the final rolled-out position
+                loss      = self._objective(current_pos)
 
                 loss.backward()
                 optim.step()
@@ -338,11 +361,18 @@ class ClothInverseDesigner:
         if best_z is not None:
             best_z_t = torch.from_numpy(best_z).to(self._device)
             with torch.no_grad():
-                wp_best     = self._decode_pose(best_z_t, target_norm)
-                g_best      = self._build_data_from_pos(wp_best.detach())
-                np_best     = self._simulator(g_best)
+                wp_best      = self._decode_pose(best_z_t, target_norm)
+                # K=5 rollout for a realistic deformed state (mirrors the training loop)
+                K            = 5
+                cur          = wp_best
+                prv          = wp_best.clone()
+                for _ in range(K):
+                    g_k  = self._build_data_from_pos(cur, prv)
+                    nxt  = self._simulator(g_k)
+                    prv  = cur
+                    cur  = nxt
                 disp        = torch.norm(
-                    np_best[self._objective._normal_mask] -
+                    cur[self._objective._normal_mask] -
                     self._objective._mesh_rest[self._objective._normal_mask],
                     dim=-1
                 )

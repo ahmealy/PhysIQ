@@ -23,6 +23,11 @@ export const DatasetStudio: React.FC = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
   const timerRef = useRef<any>(null);
 
+  // Per-domain caches — keyed by domain string, populated on first visit, never evicted
+  const dataCache    = useRef<Record<string, any>>({});
+  const infoCache    = useRef<Record<string, any>>({});
+  const previewCache = useRef<Record<string, any>>({});
+
   // Load available domains once
   useEffect(() => {
     fetch('/api/status')
@@ -31,41 +36,61 @@ export const DatasetStudio: React.FC = () => {
       .catch(() => {});
   }, []);
 
-  // Reload data whenever domain changes
+  // On domain change: restore from cache instantly, only fetch what is missing
   useEffect(() => {
-    setData(null);
     setError(null);
     setFlagResult(null);
-    setElapsed(0);
-    setInfo(null);
-    setPreview(null);
-    clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
 
-    fetch(`/api/dataset/samples?domain=${domain}`)
-      .then(r => {
-        if (!r.ok) throw new Error(`Server error ${r.status}`);
-        return r.json();
-      })
-      .then(d => {
-        clearInterval(timerRef.current);
-        setData(d);
-      })
-      .catch(e => {
-        clearInterval(timerRef.current);
-        setError(e.message);
-      });
+    // Restore cached values immediately (no flash of empty state)
+    setData(dataCache.current[domain] ?? null);
+    setInfo(infoCache.current[domain] ?? null);
+    setPreview(previewCache.current[domain] ?? null);
 
-    fetch(`/api/dataset/info?domain=${domain}&split=train`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => setInfo(d))
-      .catch(() => {});
+    const needsSamples = !dataCache.current[domain];
+    const needsInfo    = !infoCache.current[domain];
+    const needsPreview = !previewCache.current[domain];
 
-    setPreviewLoading(true);
-    fetch(`/api/dataset/mesh_preview?domain=${domain}&trajectory=0`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { setPreview(d); setPreviewLoading(false); })
-      .catch(() => { setPreviewLoading(false); });
+    // Start elapsed timer only if we actually need to fetch something
+    if (needsSamples) {
+      setElapsed(0);
+      clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
+    }
+
+    if (needsSamples) {
+      fetch(`/api/dataset/samples?domain=${domain}`)
+        .then(r => {
+          if (!r.ok) throw new Error(`Server error ${r.status}`);
+          return r.json();
+        })
+        .then(d => {
+          clearInterval(timerRef.current);
+          dataCache.current[domain] = d;
+          setData(d);
+        })
+        .catch(e => {
+          clearInterval(timerRef.current);
+          setError(e.message);
+        });
+    }
+
+    if (needsInfo) {
+      fetch(`/api/dataset/info?domain=${domain}&split=train`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) { infoCache.current[domain] = d; setInfo(d); } })
+        .catch(() => {});
+    }
+
+    if (needsPreview) {
+      setPreviewLoading(true);
+      fetch(`/api/dataset/mesh_preview?domain=${domain}&trajectory=0`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (d) { previewCache.current[domain] = d; setPreview(d); }
+          setPreviewLoading(false);
+        })
+        .catch(() => { setPreviewLoading(false); });
+    }
 
     return () => clearInterval(timerRef.current);
   }, [domain]);

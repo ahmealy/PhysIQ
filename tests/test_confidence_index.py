@@ -8,11 +8,11 @@ def _random_embeddings(n: int, dim: int = 128, seed: int = 42) -> np.ndarray:
 
 
 def test_build_sets_backend():
-    """After build(), backend is 'scipy' (or 'cpp' if compiled)."""
+    """After build(), backend is 'scipy', 'cpp', or 'faiss' depending on what's installed."""
     from confidence.index import NearestNeighborIndex
     idx = NearestNeighborIndex()
     idx.build(_random_embeddings(50))
-    assert idx.backend in ("scipy", "cpp")
+    assert idx.backend in ("scipy", "cpp", "faiss")
 
 
 def test_build_sets_train_diameter():

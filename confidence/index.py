@@ -25,16 +25,23 @@ class NearestNeighborIndex:
         self.train_diameter: float = 1.0
         self._scipy_tree: KDTree = None
         self._cpp_tree = None
+        self._faiss_index = None
 
     def build(self, embeddings: np.ndarray) -> None:
-        """Build the index from training embeddings [N_train, dim]."""
+        """Build the index from training embeddings [N_train, dim].
+
+        Backend priority (fastest available wins):
+          1. FAISS IndexFlatL2  — exact, highly optimised  (pip install faiss-cpu)
+          2. C++ KDTree         — exact, pybind11           (cmake && make)
+          3. scipy KDTree       — exact, always available   (fallback)
+        """
         self.embeddings = embeddings.astype(np.float32)
 
-        # Always build scipy tree
+        # Always build scipy tree (used for train_diameter computation + fallback)
         self._scipy_tree = KDTree(self.embeddings)
         self.backend = "scipy"
 
-        # Try C++ backend (opt-in)
+        # Try C++ backend (opt-in, compiled once)
         self._cpp_tree = None
         try:
             import os, sys
@@ -44,6 +51,18 @@ class NearestNeighborIndex:
             from _kdtree import KDTree as CppKDTree  # type: ignore
             self._cpp_tree = CppKDTree(self.embeddings)
             self.backend = "cpp"
+        except ImportError:
+            pass
+
+        # Try FAISS (fastest — overrides C++ if available)
+        self._faiss_index = None
+        try:
+            import faiss  # type: ignore
+            n, dim = self.embeddings.shape
+            idx = faiss.IndexFlatL2(dim)
+            idx.add(self.embeddings)
+            self._faiss_index = idx
+            self.backend = "faiss"
         except ImportError:
             pass
 
@@ -60,11 +79,13 @@ class NearestNeighborIndex:
             raise RuntimeError("Call build() before query()")
         q = embedding.reshape(1, -1).astype(np.float32)
 
-        if self._cpp_tree is not None:
+        if self._faiss_index is not None:
+            dists_sq, _ = self._faiss_index.search(q, 1)
+            d_min = float(np.sqrt(max(dists_sq[0, 0], 0.0)))
+        elif self._cpp_tree is not None:
             d_min = float(self._cpp_tree.query(q, k=1)[0])
         else:
             dist, _ = self._scipy_tree.query(q, k=1)
-            # dist shape is (1,) when querying a single point with k=1
             d_min = float(np.asarray(dist).flat[0])
 
         return float(np.clip(1.0 - d_min / (self.train_diameter + 1e-12), 0.0, 1.0))

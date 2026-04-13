@@ -1,7 +1,93 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as d3 from 'd3';
+
+// ── 2-D Canvas fallback (used when WebGL is unavailable) ─────────────────────
+// Renders the cloth mesh as a flat XZ projection with per-node coloring.
+interface Fallback2DProps {
+  worldPositions: [number, number, number][];
+  faces: [number, number, number][];
+  colorValues?: number[];
+  minVal?: number;
+  maxVal?: number;
+}
+
+const ClothPlot2DFallback: React.FC<Fallback2DProps> = ({
+  worldPositions, faces, colorValues, minVal, maxVal,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || worldPositions.length === 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Project XZ plane (x→width, z→height flipped)
+    const xs = worldPositions.map(p => p[0]);
+    const zs = worldPositions.map(p => p[2]);
+    const xMin = Math.min(...xs), xMax = Math.max(...xs) || 1;
+    const zMin = Math.min(...zs), zMax = Math.max(...zs) || 1;
+    const pad = 20;
+    const scaleX = (W - pad * 2) / (xMax - xMin || 1);
+    const scaleZ = (H - pad * 2) / (zMax - zMin || 1);
+    const scale = Math.min(scaleX, scaleZ);
+    const offX = pad + ((W - pad * 2) - (xMax - xMin) * scale) / 2;
+    const offZ = pad + ((H - pad * 2) - (zMax - zMin) * scale) / 2;
+
+    const px = (i: number) => offX + (worldPositions[i][0] - xMin) * scale;
+    const pz = (i: number) => H - (offZ + (worldPositions[i][2] - zMin) * scale);
+
+    const vals = colorValues ?? worldPositions.map(p => Math.sqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]));
+    const lo = minVal ?? (d3.min(vals) ?? 0);
+    const hi = maxVal ?? (d3.max(vals) ?? 1);
+    const colorScale = d3.scaleSequential(d3.interpolateTurbo).domain([lo, hi]);
+
+    // Draw triangles — average vertex color for each face
+    for (const [a, b, c] of faces) {
+      const avgVal = (vals[a] + vals[b] + vals[c]) / 3;
+      ctx.fillStyle = colorScale(avgVal);
+      ctx.beginPath();
+      ctx.moveTo(px(a), pz(a));
+      ctx.lineTo(px(b), pz(b));
+      ctx.lineTo(px(c), pz(c));
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Thin mesh overlay
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 0.4;
+    for (const [a, b, c] of faces) {
+      ctx.beginPath();
+      ctx.moveTo(px(a), pz(a));
+      ctx.lineTo(px(b), pz(b));
+      ctx.lineTo(px(c), pz(c));
+      ctx.closePath();
+      ctx.stroke();
+    }
+  }, [worldPositions, faces, colorValues, minVal, maxVal]);
+
+  return (
+    <div className="flex-1 flex flex-col items-stretch relative min-h-[200px]">
+      <canvas ref={canvasRef} width={600} height={420}
+        className="w-full h-full object-contain" />
+      <div className="absolute bottom-2 left-0 right-0 flex justify-center">
+        <span className="text-[10px] text-amber-400/70 bg-slate-900/80 px-2 py-0.5 rounded">
+          3D view unavailable — WebGL requires GPU acceleration.
+          Restart Chrome with <code className="font-mono">--use-gl=swiftshader</code> to enable.
+        </span>
+      </div>
+    </div>
+  );
+};
 
 export interface ClothPlot3DProps {
   /** [N, 3] world positions for the current frame */
@@ -30,6 +116,7 @@ export const ClothPlot3D: React.FC<ClothPlot3DProps> = ({
   onCameraChange,
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
+  const [webglError, setWebglError] = useState<string | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
@@ -53,8 +140,19 @@ export const ClothPlot3D: React.FC<ClothPlot3DProps> = ({
     const W = container.clientWidth  || 400;
     const H = container.clientHeight || 300;
 
-    // Renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    // Renderer — may fail if WebGL is not supported (headless / software-only GPU)
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    } catch (err: any) {
+      setWebglError(String(err?.message ?? err));
+      return;
+    }
+    if (!renderer.getContext()) {
+      setWebglError('WebGL context creation failed (no hardware acceleration available)');
+      renderer.dispose();
+      return;
+    }
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(W, H);
     renderer.setClearColor(0x0f172a);  // slate-950 background
@@ -234,9 +332,19 @@ export const ClothPlot3D: React.FC<ClothPlot3DProps> = ({
     <div className="flex flex-col h-full w-full bg-slate-900/50 rounded-lg border border-slate-700 overflow-hidden">
       <div className="px-3 py-2 border-b border-slate-700 bg-slate-800/50 flex justify-between items-center">
         <span className="text-xs font-medium text-slate-300 uppercase tracking-wider">{title}</span>
-        <span className="text-[10px] text-slate-500">drag: rotate • scroll: zoom • right-drag: pan</span>
+        {!webglError && <span className="text-[10px] text-slate-500">drag: rotate • scroll: zoom • right-drag: pan</span>}
       </div>
-      <div ref={mountRef} className="flex-1 relative min-h-[200px]" />
+      {webglError ? (
+        <ClothPlot2DFallback
+          worldPositions={worldPositions}
+          faces={faces}
+          colorValues={colorValues}
+          minVal={minVal}
+          maxVal={maxVal}
+        />
+      ) : (
+        <div ref={mountRef} className="flex-1 relative min-h-[200px]" />
+      )}
     </div>
   );
 };

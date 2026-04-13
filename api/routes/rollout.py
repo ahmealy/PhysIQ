@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import datetime
 import json
 import os
 import pickle
@@ -39,6 +40,11 @@ _rollout_state: dict = {
 
 # Cache dataset objects so we don't reload on every rollout request
 _dataset_cache: dict = {}
+
+
+def _ts() -> str:
+    """Compact timestamp suffix: YYYYMMDD_HHMMSS"""
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def _get_dataset(data_dir: str, split: str) -> FpcDataset:
@@ -196,7 +202,7 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
 
     # Save pkl
     os.makedirs("result", exist_ok=True)
-    pkl_path = "result/result%d.pkl" % req.trajectory_index
+    pkl_path = "result/result_traj%d_%s.pkl" % (req.trajectory_index, _ts())
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], crds, {
             "domain":            req.domain,
@@ -301,7 +307,7 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
             pass  # confidence is optional — never block the rollout
 
     os.makedirs("result", exist_ok=True)
-    pkl_path = "result/flag_result%d.pkl" % req.trajectory_index
+    pkl_path = "result/flag_result_traj%d_%s.pkl" % (req.trajectory_index, _ts())
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
             "domain":            "flag_simple",
@@ -359,8 +365,9 @@ async def run_rollout(req: RolloutRequest):
     })
 
     # ── Remote GPU path ───────────────────────────────────────────────────────
+    from api.routes.train import _remote_ssh_active
     remote_cfg = _load_remote_cfg()
-    if remote_cfg:
+    if _remote_ssh_active(remote_cfg):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         # Write rollout config JSON for rollout_ssh.py to read
         os.makedirs("runs", exist_ok=True)

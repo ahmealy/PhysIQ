@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import os
 import pickle
 import time
@@ -119,7 +120,8 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
 
     # Save result pkl
     os.makedirs('result', exist_ok=True)
-    pkl_path = 'result/result%d.pkl' % rollout_index
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    pkl_path = 'result/result_traj%d_%s.pkl' % (rollout_index, ts)
     with open(pkl_path, 'wb') as f:
         pickle.dump([result, crds, {
             "domain":          "cylinder_flow",
@@ -188,7 +190,8 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
     mesh_pos = _npz["mesh_pos"].astype(np.float32)
     cells = _npz["cells"].astype(np.int32)  # [F, 3]
     os.makedirs("result", exist_ok=True)
-    pkl_path = "result/flag_result%d.pkl" % rollout_index
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    pkl_path = "result/flag_result_traj%d_%s.pkl" % (rollout_index, ts)
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
             "domain":          "flag_simple",

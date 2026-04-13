@@ -20,6 +20,7 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 
 import argparse
+import datetime
 import json
 import os
 import pickle
@@ -37,6 +38,11 @@ sys.path.insert(0, _ROOT)
 def _sse(obj: dict) -> None:
     """Print a single SSE event to stdout."""
     print("data: %s\n" % json.dumps(obj), flush=True)
+
+
+def _ts() -> str:
+    """Compact timestamp suffix: YYYYMMDD_HHMMSS"""
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def _run_rollout(cfg: dict, req: dict) -> dict:
@@ -61,6 +67,9 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
     traj_idx = req["trajectory_index"]
 
     transformer = T.Compose([T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)])
+
+    _raw_graph = dataset[traj_idx * n_steps]
+    faces = _raw_graph.face.numpy().T.astype(np.int32)  # [F, 3]
 
     predicted_velocity = None
     boundary_mask = None
@@ -106,9 +115,6 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
     sq_diff       = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
     per_step_rmse = np.sqrt(np.mean(sq_diff, axis=1))
 
-    os.makedirs("result", exist_ok=True)
-    pkl_path = "result/result%d.pkl" % traj_idx
-
     # Confidence score — requires domain-scoped embedding_index built after training
     confidence_score = None
     _domain_slug = domain.replace("_", "")  # cylinderflow, flagsimple
@@ -126,11 +132,16 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
         except Exception:
             pass  # confidence is optional — never block the rollout
 
+    os.makedirs("result", exist_ok=True)
+    pkl_path = "result/result_traj%d_%s.pkl" % (traj_idx, _ts())
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], crds, {
             "domain":           domain,
             "target_field":     target_field,
             "confidence_score": confidence_score,
+            "faces":            faces,
+            "speedup":          round(speedup, 2),
+            "elapsed_seconds":  round(elapsed, 3),
         }], f)
 
     return {
@@ -176,14 +187,18 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
                 graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
                 graph.prev_x = prev_world.detach()
 
+            # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py
+            predicteds.append(graph.world_pos.detach().cpu().numpy())
+            targets_list.append(graph.y.detach().cpu().numpy())
+
             prev_world = graph.world_pos.clone()
             next_world = model(graph)
-            node_type = graph.x[:, 3].long()
-            handle_mask = (node_type == NodeType.HANDLE)
-            next_world[handle_mask] = graph.y[handle_mask]
 
-            predicteds.append(next_world.detach().cpu().numpy())
-            targets_list.append(graph.y.detach().cpu().numpy())
+            # Pin HANDLE nodes to cur_pos (fully autoregressive, matches DeepMind)
+            node_type = graph.x[:, 3].long()
+            handle_mask = (node_type != NodeType.NORMAL)
+            next_world[handle_mask] = graph.world_pos[handle_mask]
+
             cur_world = next_world
 
             if i % 20 == 0 or i == n_steps - 1:
@@ -195,13 +210,14 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
 
     predicted_arr = np.stack(predicteds)
     targets_arr   = np.stack(targets_list)
-    mesh_pos = np.asarray(dataset.mesh_pos_list[traj_idx], dtype=np.float32)
+
+    # Load mesh_pos and cells directly from npz — FlagDataset has no mesh_pos_list attribute
+    _traj_path = os.path.join(dataset._split_dir, "traj_%05d.npz" % traj_idx)
+    mesh_pos = np.load(_traj_path)["mesh_pos"].astype(np.float32)
+    cells    = np.load(_traj_path)["cells"].astype(np.int32)
 
     sq = np.square(predicted_arr - targets_arr).reshape(n_steps, -1)
     per_step_rmse = np.sqrt(np.mean(sq, axis=1))
-
-    os.makedirs("result", exist_ok=True)
-    pkl_path = "result/flag_result%d.pkl" % traj_idx
 
     # Confidence score — requires domain-scoped embedding_index built after training
     confidence_score = None
@@ -212,7 +228,6 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
             from model.embedding import extract_embedding
 
             _index = NearestNeighborIndex.load(index_path)
-            # Cloth uses no transform — index was built the same way
             _first_idx = int(dataset._cum_steps[traj_idx])
             _first_graph = dataset[_first_idx]
             _emb = extract_embedding(model, _first_graph, device=device)
@@ -220,11 +235,16 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
         except Exception:
             pass  # confidence is optional — never block the rollout
 
+    os.makedirs("result", exist_ok=True)
+    pkl_path = "result/flag_result_traj%d_%s.pkl" % (traj_idx, _ts())
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], mesh_pos, {
             "domain":           "flag_simple",
-            "target_field":     "velocity",
+            "target_field":     "world_pos",
             "confidence_score": confidence_score,
+            "faces":            cells,
+            "speedup":          round(speedup, 2),
+            "elapsed_seconds":  round(elapsed, 3),
         }], f)
 
     return {

@@ -672,8 +672,7 @@ async def generate(req: GenerateRequest):
                 else sampler.sample(req.target_value,
                                     req.n_candidates,
                                     req.device,
-                                    req.method,
-                                    "quick")
+                                    req.method)
             )
 
             # Stream optimisation trajectory first (gradient mode only)

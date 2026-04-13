@@ -236,10 +236,12 @@ def get_frame(filename: str, t: int):
         raise HTTPException(400, "Timestep %d out of range (0-%d)" % (t, T - 1))
 
     if target_field == "world_pos":
-        # Cloth: per-node 3D position error magnitude
-        pred_mag   = np.linalg.norm(predicted[t], axis=-1)
-        target_mag = np.linalg.norm(targets[t],   axis=-1)
-        error      = np.linalg.norm(predicted[t] - targets[t], axis=-1)
+        # Cloth: colour panels by per-node displacement from rest (mesh_pos).
+        # crds = mesh_pos [N, 2]; pad to 3D for distance from 3D world_pos.
+        mesh_rest = np.pad(crds, ((0, 0), (0, 1)), constant_values=0.0)  # [N, 3]
+        pred_mag   = np.linalg.norm(predicted[t] - mesh_rest, axis=-1)   # displacement from rest
+        target_mag = np.linalg.norm(targets[t]   - mesh_rest, axis=-1)
+        error      = np.linalg.norm(predicted[t] - targets[t], axis=-1)  # pred vs GT error
     elif target_field == "pressure":
         pred_mag   = predicted[t, :, 0]   # [N] — scalar pressure
         target_mag = targets[t, :, 0]     # [N]

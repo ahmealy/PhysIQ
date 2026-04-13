@@ -125,12 +125,23 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
             if predicted_velocity is not None:
                 graph.x[:, field_slice] = predicted_velocity.detach()
 
-            next_v = graph.y
-            predicted_velocity = model(graph, velocity_sequence_noise=None)
-            predicted_velocity[boundary_mask] = next_v[boundary_mask]
+            # GT velocity at t — read BEFORE any overwrite (always from dataset)
+            gt_velocity_t = graph.x[:, field_slice].detach().cpu().numpy()  # [N, d]
 
-            predicteds.append(predicted_velocity.detach().cpu().numpy())
-            targets_list.append(next_v.detach().cpu().numpy())
+            if predicted_velocity is not None:
+                graph.x[:, field_slice] = predicted_velocity.detach()
+
+            # Autoregressive input velocity at t — GT at t=0, own prediction from t=1
+            # This is what DeepMind writes to trajectory[t] in cfd_eval.py
+            rollout_velocity_t = graph.x[:, field_slice].detach().cpu().numpy()
+
+            predicted_velocity = model(graph, velocity_sequence_noise=None)
+            predicted_velocity[boundary_mask] = graph.y[boundary_mask]
+
+            # predicteds[t] = autoregressive input velocity at t  (matches DeepMind trajectory[t])
+            # targets[t]    = GT velocity at t                    (matches DeepMind inputs['velocity'][t])
+            predicteds.append(rollout_velocity_t)
+            targets_list.append(gt_velocity_t)
 
             # Report progress every 20 steps
             if i % 20 == 0 or i == n_steps - 1:
@@ -254,9 +265,13 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
                 graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
                 graph.prev_x    = prev_world.detach()
 
-            # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py
+            # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py:
+            #   trajectory[t] = cur_pos (the input at step t)
+            #   compared against inputs['world_pos'][t] (GT at same step t)
+            # So both predicted and target are world_pos at time t.
+            gt_world_t = dataset[idx].world_pos.numpy()   # GT at t, before any rollout overwrite
             predicteds.append(graph.world_pos.detach().cpu().numpy())
-            targets_list.append(graph.y.detach().cpu().numpy())
+            targets_list.append(gt_world_t)
 
             prev_world = graph.world_pos.clone()
             next_world = model(graph)  # [N, 3]

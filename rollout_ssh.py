@@ -91,15 +91,23 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
                 )
                 boundary_mask = torch.logical_not(fluid)
 
+            # GT velocity at t — read BEFORE any overwrite (always from dataset)
+            gt_velocity_t = graph.x[:, field_slice].detach().cpu().numpy()
+
             if predicted_velocity is not None:
                 graph.x[:, field_slice] = predicted_velocity.detach()
+
+            # Autoregressive input at t: GT at t=0, own prediction from t=1 onward
+            rollout_velocity_t = graph.x[:, field_slice].detach().cpu().numpy()
 
             next_v = graph.y
             predicted_velocity = model(graph, velocity_sequence_noise=None)
             predicted_velocity[boundary_mask] = next_v[boundary_mask]
 
-            predicteds.append(predicted_velocity.detach().cpu().numpy())
-            targets_list.append(next_v.detach().cpu().numpy())
+            # predicteds[t] = autoregressive input at t  (matches DeepMind trajectory[t])
+            # targets[t]    = GT at t                    (matches DeepMind inputs['velocity'][t])
+            predicteds.append(rollout_velocity_t)
+            targets_list.append(gt_velocity_t)
 
             if i % 20 == 0 or i == n_steps - 1:
                 _sse({"type": "progress", "step": i + 1, "total": n_steps})
@@ -187,9 +195,11 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
                 graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
                 graph.prev_x = prev_world.detach()
 
-            # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py
+            # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py:
+            #   trajectory[t] = cur_pos (input at t), compared against GT world_pos at t
+            gt_world_t = dataset[idx].world_pos.numpy()   # GT at t, unaffected by rollout
             predicteds.append(graph.world_pos.detach().cpu().numpy())
-            targets_list.append(graph.y.detach().cpu().numpy())
+            targets_list.append(gt_world_t)
 
             prev_world = graph.world_pos.clone()
             next_world = model(graph)

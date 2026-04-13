@@ -87,7 +87,6 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
         graph = graph.to(device)
 
         # Build boundary mask once from step 0 — assumes fixed topology (cylinder_flow).
-        # For domains with dynamic node types, this would need to be re-evaluated each step.
         if boundary_mask is None:
             node_type = graph.x[:, 0]
             fluid_mask = torch.logical_or(
@@ -96,19 +95,25 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
             )
             boundary_mask = torch.logical_not(fluid_mask)
 
-        # Swap in own prediction (skip on first step — use ground truth as seed)
+        # GT velocity at t — read BEFORE any overwrite (always from dataset)
+        gt_velocity_t = graph.x[:, 1:3].detach().cpu().numpy()  # [N, 2]
+
+        # Swap in own prediction from previous step (skip on first step)
         if predicted_velocity is not None:
             graph.x[:, 1:3] = predicted_velocity.detach()
 
-        next_v = graph.y  # ground truth at t+1
+        # Autoregressive input at t: GT at t=0, own prediction from t=1 onward
+        rollout_velocity_t = graph.x[:, 1:3].detach().cpu().numpy()
 
         predicted_velocity = model(graph, velocity_sequence_noise=None)
 
         # Pin boundary nodes back to ground truth
-        predicted_velocity[boundary_mask] = next_v[boundary_mask]
+        predicted_velocity[boundary_mask] = graph.y[boundary_mask]
 
-        predicteds.append(predicted_velocity.detach().cpu().numpy())
-        targets.append(next_v.detach().cpu().numpy())
+        # predicteds[t] = autoregressive input velocity at t  (matches DeepMind trajectory[t])
+        # targets[t]    = GT velocity at t                    (matches DeepMind inputs['velocity'][t])
+        predicteds.append(rollout_velocity_t)
+        targets.append(gt_velocity_t)
 
     elapsed = time.perf_counter() - t_start
 
@@ -160,11 +165,11 @@ def rollout_cloth(model, dataset, rollout_index: int = 0, device: str = "cpu"):
             graph.x = torch.cat([cur_world.detach(), graph.x[:, 3:]], dim=-1)
             graph.prev_x    = prev_world.detach()
 
-        # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py which
-        # writes cur_pos (the input) to the trajectory, not the prediction.
-        # trajectory[t] = position fed as input at step t (= prediction from step t-1)
+        # Record cur_world BEFORE stepping — matches DeepMind cloth_eval.py:
+        #   trajectory[t] = cur_pos (input at t), compared against GT world_pos at t
+        gt_world_t = dataset[idx].world_pos.numpy()   # GT at t, unaffected by rollout
         predicteds.append(graph.world_pos.detach().cpu().numpy())
-        targets_list.append(graph.y.detach().cpu().numpy())
+        targets_list.append(gt_world_t)
 
         prev_world = graph.world_pos.clone()
         next_world = model(graph)   # [N, 3]

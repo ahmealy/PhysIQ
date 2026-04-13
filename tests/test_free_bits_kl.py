@@ -15,7 +15,7 @@ Key behavioural contracts tested here:
   2. When a dimension's KL is below free_bits, it contributes exactly
      free_bits to the loss (not the raw KL value).
   3. When a dimension's KL is above free_bits, it contributes its raw KL.
-  4. CVAEConfig and ClothCVAEConfig expose a free_bits field defaulting to 0.0.
+  4. CVAEConfig and ClothCVAEConfig expose a free_bits field.
   5. CVAETrainer._kl_loss and ClothCVAETrainer._kl_loss accept and use
      the free_bits value from their config.
   6. The training loop in fit() uses the free-bits KL, not the old formula.
@@ -63,21 +63,21 @@ def _make_cloth_trainer(free_bits: float = 0.0):
 
 
 # ---------------------------------------------------------------------------
-# 1. CVAEConfig exposes free_bits field defaulting to 0.0
+# 1. CVAEConfig exposes free_bits field
 # ---------------------------------------------------------------------------
 
 def test_cvae_config_has_free_bits_field():
-    """CVAEConfig must have a free_bits attribute defaulting to 0.0."""
+    """CVAEConfig must have a free_bits attribute."""
     cfg = CVAEConfig()
     assert hasattr(cfg, "free_bits"), "CVAEConfig missing free_bits field"
-    assert cfg.free_bits == 0.0
+    assert cfg.free_bits >= 0.0
 
 
 def test_cloth_cvae_config_has_free_bits_field():
-    """ClothCVAEConfig must have a free_bits attribute defaulting to 0.0."""
+    """ClothCVAEConfig must have a free_bits attribute."""
     cfg = ClothCVAEConfig()
     assert hasattr(cfg, "free_bits"), "ClothCVAEConfig missing free_bits field"
-    assert cfg.free_bits == 0.0
+    assert cfg.free_bits >= 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from api.state import DOMAINS, get_gnn_scorer
+from api.state import DOMAINS
 
 router = APIRouter()
 
@@ -80,7 +80,6 @@ class GenerateRequest(BaseModel):
     n_candidates:     int   = 5
     method:           str   = "sample"  # "sample" | "gradient"
     device:           str   = "cpu"
-    mode:             str   = "quick"   # "quick" | "deep"
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +97,6 @@ class CandidateResult:
     is_ood:               bool
     mesh_nodes:           int
     params:               dict     # domain-specific params
-    # Deep mode fields — all None/False in quick mode
-    gnn_predicted_value:  float | None = None
-    score_gap:            float | None = None   # |surrogate - gnn|
-    gnn_converged:        bool  | None = None   # False if 200-step cap hit
-    gnn_failed:           bool         = False  # True if rollout threw
 
 
 # ---------------------------------------------------------------------------
@@ -140,40 +134,11 @@ class CFDDesignSampler(BaseDesignSampler):
     SURROGATE_PATH = "checkpoints/drag_surrogate.pth"
 
     def sample(self, target: float, n: int, device: str,
-               method: str = "sample", mode: str = "quick") -> tuple[list, list]:
+               method: str = "sample") -> tuple[list, list]:
         """
-        Generate n candidates. mode='quick' uses MLP surrogate only.
-        mode='deep' adds GNN adaptive rollout scoring after sampling.
+        Generate n candidates using the CVAE + MLP surrogate.
         """
-        results, trajectory = self._quick_sample(target, n, device, method)
-
-        if mode == "deep":
-            cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
-            if not os.path.exists(cfd_ckpt):
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Deep mode requested but GNN checkpoint not found at %s. "
-                    "Returning quick-mode results.", cfd_ckpt
-                )
-                return results, trajectory
-
-            scorer = get_gnn_scorer(cfd_ckpt, device=device)
-            graphs = [g for _, g in results]
-            gnn_scores = scorer.score_candidates(graphs, device=device)
-
-            import math
-            updated = []
-            for (c, g), score in zip(results, gnn_scores):
-                if math.isnan(score.gnn_predicted_value):
-                    c.gnn_failed = True
-                else:
-                    c.gnn_predicted_value = score.gnn_predicted_value
-                    c.score_gap           = abs(c.predicted_value - score.gnn_predicted_value)
-                    c.gnn_converged       = score.converged
-                updated.append((c, g))
-            results = updated
-
-        return results, trajectory
+        return self._quick_sample(target, n, device, method)
 
     def _quick_sample(self, target: float, n: int, device: str,
                       method: str = "sample") -> tuple[list, list]:
@@ -638,7 +603,7 @@ async def generate(req: GenerateRequest):
 
     Returns a Server-Sent Events (SSE) stream:
         event: candidate   data: { CandidateResult fields... }
-        event: gnn_score   data: { id, gnn_predicted_value, score_gap, ... }
+        event: trajectory  data: { "values": [...] }
         event: warning     data: { "detail": "..." }
         event: error       data: { "detail": "..." }
         event: done        data: { "best_id": int }
@@ -659,7 +624,7 @@ async def generate(req: GenerateRequest):
         try:
             sampler = _DOMAIN_SAMPLERS[req.domain]()
 
-            # ── Phase 1: quick sample (CVAE + surrogate) ──────────────────────
+            # ── Sample candidates (CVAE + surrogate) ─────────────────────────
             # Run in thread pool to avoid blocking the event loop.
             loop = asyncio.get_running_loop()
             results, trajectory = await loop.run_in_executor(
@@ -680,7 +645,7 @@ async def generate(req: GenerateRequest):
                 yield _sse_event("trajectory", {"values": trajectory})
                 await asyncio.sleep(0)
 
-            # ── Phase 2: render thumbnails + stream quick candidates ───────────
+            # ── Render thumbnails + stream candidates ─────────────────────────
             session_thumbs: dict[int, bytes] = {}
             thumbnail_urls: dict[int, str | None] = {}
             best_id  = 0
@@ -721,57 +686,6 @@ async def generate(req: GenerateRequest):
                 payload["session_id"]    = session_id
                 yield _sse_event("candidate", payload)
                 await asyncio.sleep(0)
-
-            # ── Phase 3 (deep mode): GNN score each candidate one at a time ───
-            # Stream a `gnn_score` event after each rollout so the UI updates
-            # progressively instead of waiting for all candidates to finish.
-            if req.mode == "deep" and req.domain == "cylinder_flow":
-                from api.state import get_gnn_scorer, DOMAINS
-                import math
-
-                cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
-                if not os.path.exists(cfd_ckpt):
-                    yield _sse_event("warning", {
-                        "detail": "GNN checkpoint not found — results are surrogate-only."
-                    })
-                else:
-                    scorer = get_gnn_scorer(cfd_ckpt, device=req.device)
-                    scorer.simulator.eval()
-
-                    for idx, (c, graph) in enumerate(results):
-                        # Score one candidate in a thread so the event loop stays live
-                        try:
-                            gnn_score = await loop.run_in_executor(
-                                None,
-                                lambda g=graph: scorer._adaptive_rollout(g, req.device)
-                            )
-                            if math.isnan(gnn_score.gnn_predicted_value):
-                                raise ValueError("NaN drag")
-                            gnn_val  = gnn_score.gnn_predicted_value
-                            gap      = abs(c.predicted_value - gnn_val)
-                            converged = gnn_score.converged
-                            failed   = False
-                        except Exception as exc:
-                            import logging
-                            logging.getLogger(__name__).warning(
-                                "GNN rollout failed for candidate %d (%s) — "
-                                "model may be undertrained (NaN/divergence after few epochs): %s",
-                                idx, type(exc).__name__, exc)
-                            gnn_val  = None
-                            gap      = None
-                            converged = None
-                            failed   = True
-
-                        yield _sse_event("gnn_score", {
-                            "id":                  c.id,
-                            "gnn_predicted_value": gnn_val,
-                            "score_gap":           gap,
-                            "gnn_converged":       converged,
-                            "gnn_failed":          failed,
-                            "candidate_index":     idx,
-                            "total_candidates":    len(results),
-                        })
-                        await asyncio.sleep(0)
 
             yield _sse_event("done", {"best_id": best_id, "session_id": session_id})
 

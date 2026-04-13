@@ -14,12 +14,6 @@ interface CandidateCardProps {
   thumbnailUrl?: string | null;
   isSelected?: boolean;
   onSelect?: () => void;
-  // Deep mode props
-  mode?: 'quick' | 'deep';
-  gnnPredictedValue?: number | null;
-  scoreGap?: number | null;
-  gnnConverged?: boolean | null;
-  gnnFailed?: boolean;
   // Analyze button
   sessionId?: string | null;
   onAnalyze?: (sessionId: string, candidateId: number) => Promise<void>;
@@ -46,11 +40,6 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
   thumbnailUrl,
   isSelected = false,
   onSelect,
-  mode = 'quick',
-  gnnPredictedValue,
-  scoreGap,
-  gnnConverged,
-  gnnFailed,
   sessionId,
   onAnalyze,
 }) => {
@@ -73,21 +62,6 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
   const physLabel    = domain === 'cylinder_flow' ? 'Drag proxy' : 'Stress proxy';
   const hasConf      = oodConfidence >= 0;
   const confPct      = hasConf ? (oodConfidence * 100).toFixed(0) : null;
-
-  // Deep mode — GNN score display helpers
-  const isDeep   = mode === 'deep';
-  const hasGnn   = isDeep && gnnPredictedValue != null && !gnnFailed;
-  const gnnLabel = hasGnn
-    ? `${gnnConverged === false ? '~' : ''}${gnnPredictedValue!.toFixed(4)}`
-    : null;
-  const gapColor = scoreGap == null  ? ''
-    : scoreGap < 0.1  ? 'text-emerald-400'
-    : scoreGap < 0.2  ? 'text-amber-400'
-    : 'text-red-400';
-  const gapDot   = scoreGap == null  ? ''
-    : scoreGap < 0.1  ? '🟢'
-    : scoreGap < 0.2  ? '🟡'
-    : '🔴';
 
   return (
     <div
@@ -137,38 +111,11 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
 
       {/* Metrics */}
       <div className="p-3 space-y-2">
-        {/* Physics score row(s) */}
-        {isDeep ? (
-          <>
-            <div className="flex justify-between text-xs">
-              <span className="text-slate-400">Surrogate</span>
-              <span className="text-slate-200 font-mono">{predictedValue.toFixed(4)}</span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-slate-400">GNN</span>
-              {hasGnn ? (
-                <span className="text-violet-300 font-mono">{gnnLabel} ✓</span>
-              ) : gnnFailed ? (
-                <span className="text-amber-600 italic text-[10px]" title="Rollout diverged — model may need more training epochs">unstable rollout</span>
-              ) : (
-                <span className="text-slate-500">—</span>
-              )}
-            </div>
-            {hasGnn && scoreGap != null && (
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">Gap</span>
-                <span className={cn('font-mono', gapColor)}>
-                  {scoreGap.toFixed(4)} {gapDot}
-                </span>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="flex justify-between text-xs">
-            <span className="text-slate-400">{physLabel}</span>
-            <span className="text-slate-200 font-mono">{predictedValue.toFixed(4)}</span>
-          </div>
-        )}
+        {/* Physics score */}
+        <div className="flex justify-between text-xs">
+          <span className="text-slate-400">{physLabel}</span>
+          <span className="text-slate-200 font-mono">{predictedValue.toFixed(4)}</span>
+        </div>
 
         {/* Mesh nodes */}
         <div className="flex items-center justify-between text-[11px]">

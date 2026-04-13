@@ -19,11 +19,6 @@ interface Candidate {
   params:               Record<string, number>;
   thumbnail_url?:       string | null;
   session_id?:          string;
-  // Deep mode fields
-  gnn_predicted_value?: number | null;
-  score_gap?:           number | null;
-  gnn_converged?:       boolean | null;
-  gnn_failed?:          boolean;
 }
 
 interface GenerateConfig {
@@ -32,7 +27,6 @@ interface GenerateConfig {
   n_candidates: number;
   method:       string;
   device:       string;
-  mode:         'quick' | 'deep';
 }
 
 // ── Persistence helpers ───────────────────────────────────────────────────────
@@ -86,7 +80,6 @@ export const Generate: React.FC = () => {
       n_candidates: 6,
       method:       'sample',
       device:       'cpu',
-      mode:         'quick' as const,
     })
   );
   const [isGenerating, setIsGenerating] = useState(false);
@@ -102,8 +95,6 @@ export const Generate: React.FC = () => {
   const [optTrajectory, setOptTrajectory] = useState<number[]>(() =>
     loadLS<number[]>(LS_TRAJECTORY, [])
   );
-  // Deep mode: track how many GNN rollouts have completed out of total
-  const [gnnProgress, setGnnProgress]   = useState<{done: number; total: number} | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const navigate = useNavigate();
@@ -142,7 +133,6 @@ export const Generate: React.FC = () => {
     setError(null);
     setWarningMessage(null);
     setOptTrajectory([]);
-    setGnnProgress(null);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -181,21 +171,10 @@ export const Generate: React.FC = () => {
             const payload = JSON.parse(dataLine);
             if (eventLine === 'candidate') {
               setCandidates(prev => [...prev, payload as Candidate]);
-            } else if (eventLine === 'gnn_score') {
-              // Merge GNN score into the already-rendered candidate card
-              const { id, gnn_predicted_value, score_gap, gnn_converged,
-                      gnn_failed, candidate_index, total_candidates } = payload;
-              setCandidates(prev => prev.map(c =>
-                c.id === id
-                  ? { ...c, gnn_predicted_value, score_gap, gnn_converged, gnn_failed }
-                  : c
-              ));
-              setGnnProgress({ done: (candidate_index ?? 0) + 1, total: total_candidates ?? 1 });
             } else if (eventLine === 'trajectory') {
               setOptTrajectory(payload.values ?? []);
             } else if (eventLine === 'done') {
               setBestId(payload.best_id ?? null);
-              setGnnProgress(null);
             } else if (eventLine === 'error') {
               setError(payload.detail ?? 'Unknown error');
             } else if (eventLine === 'warning') {
@@ -210,7 +189,6 @@ export const Generate: React.FC = () => {
       }
     } finally {
       setIsGenerating(false);
-      setGnnProgress(null);
       abortRef.current = null;
     }
   }, [config]);
@@ -327,41 +305,6 @@ export const Generate: React.FC = () => {
           <span>{domCfg.description}</span>
         </div>
 
-        {/* Evaluation Mode Toggle */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-slate-400 mb-2">
-            Evaluation Mode
-          </label>
-          <div className="flex rounded-lg overflow-hidden border border-slate-700">
-            <button
-              type="button"
-              onClick={() => setConfig(c => ({ ...c, mode: 'quick' }))}
-              className={cn(
-                'flex-1 px-4 py-2 text-sm font-medium transition-colors',
-                config.mode === 'quick'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-              )}
-            >
-              ⚡ Quick
-              <span className="block text-xs font-normal opacity-75">Surrogate ~2s</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfig(c => ({ ...c, mode: 'deep' }))}
-              className={cn(
-                'flex-1 px-4 py-2 text-sm font-medium transition-colors',
-                config.mode === 'deep'
-                  ? 'bg-violet-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-              )}
-            >
-              🔬 Deep
-              <span className="block text-xs font-normal opacity-75">GNN rollout ~30s</span>
-            </button>
-          </div>
-        </div>
-
         {/* Generate button */}
         <div className="flex items-center gap-3">
           {!isGenerating ? (
@@ -385,10 +328,7 @@ export const Generate: React.FC = () => {
           {isGenerating && (
             <div className="flex items-center gap-2 text-sm text-violet-400">
               <div className="w-2 h-2 bg-violet-400 rounded-full animate-pulse" />
-              {gnnProgress
-                ? <>🔬 GNN scoring {gnnProgress.done} / {gnnProgress.total} candidates…</>
-                : <>Generating {candidates.length} / {config.n_candidates} candidates…</>
-              }
+              <>Generating {candidates.length} / {config.n_candidates} candidates…</>
             </div>
           )}
         </div>
@@ -449,11 +389,6 @@ export const Generate: React.FC = () => {
                 thumbnailUrl={c.thumbnail_url}
                 isSelected={selectedId === c.id || bestId === c.id}
                 onSelect={() => setSelectedId(c.id)}
-                mode={config.mode}
-                gnnPredictedValue={c.gnn_predicted_value}
-                scoreGap={c.score_gap}
-                gnnConverged={c.gnn_converged}
-                gnnFailed={c.gnn_failed}
                 sessionId={c.session_id ?? null}
                 onAnalyze={handleAnalyze}
               />

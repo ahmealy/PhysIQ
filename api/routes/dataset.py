@@ -18,6 +18,16 @@ router = APIRouter(prefix="/dataset")
 # Cache computed samples result so repeated page loads are instant
 _samples_cache: dict = {}
 
+# Cache for npz metadata (24 MB, slow to decompress) — keyed by npz path
+_meta_cache: dict = {}
+
+
+def _load_meta(npz_path: str):
+    """Load and cache a .npz metadata file. Avoids re-decompressing on every request."""
+    if npz_path not in _meta_cache:
+        _meta_cache[npz_path] = np.load(npz_path, allow_pickle=True)
+    return _meta_cache[npz_path]
+
 
 @router.get("/info")
 def dataset_info(domain: str = "cylinder_flow", split: str = "train"):
@@ -64,7 +74,7 @@ def dataset_info(domain: str = "cylinder_flow", split: str = "train"):
 
 def _compute_samples(npz_path: str, dat_path: str) -> dict:
     """CPU/IO-heavy computation for CFD domain — always called via run_in_executor."""
-    meta = np.load(npz_path, allow_pickle=True)
+    meta = _load_meta(npz_path)
     indices = meta["indices"]
     n_trajectories = len(indices) - 1
     shape = tuple(meta["all_velocity_shape"])
@@ -309,16 +319,27 @@ async def mesh_preview(domain: str = "cylinder_flow", trajectory: int = 0):
         npz_path = os.path.join(data_dir, "train.npz")
         if not os.path.exists(npz_path):
             raise HTTPException(404, "Dataset not found")
-        meta = np.load(npz_path, allow_pickle=True)
+        # Use cached meta — avoids re-decompressing the 24 MB npz on every request
+        meta = _load_meta(npz_path)
         indices = meta["indices"]
         if trajectory >= len(indices) - 1:
             raise HTTPException(400, "Trajectory index out of range")
         start, end = int(indices[trajectory]), int(indices[trajectory + 1])
         pos = meta["pos"][start:end].tolist()          # [N, 2]
         node_type = meta["node_type"][start:end].flatten().astype(int).tolist()
-        cells = meta["cells"].astype(int).tolist() if "cells" in meta else []
 
-        # Load velocity at t=0
+        # Filter cells to only those whose nodes all belong to this trajectory
+        # (CFD stores a single global cell array; node indices are global)
+        if "cells" in meta:
+            cells_raw = meta["cells"].astype(np.int32)   # [F, 3] global indices
+            mask = (cells_raw >= start) & (cells_raw < end)
+            valid = mask.all(axis=1)
+            # Remap to local indices (0-based within this trajectory)
+            cells_local = (cells_raw[valid] - start).tolist()
+        else:
+            cells_local = []
+
+        # Load velocity at t=0 via memmap — only reads the needed slice
         velocity_shape = tuple(meta["all_velocity_shape"])
         dat_path = npz_path.replace(".npz", ".dat")
         all_velocity = np.memmap(dat_path, dtype="float32", mode="r", shape=velocity_shape)
@@ -326,12 +347,12 @@ async def mesh_preview(domain: str = "cylinder_flow", trajectory: int = 0):
         field_values = np.linalg.norm(vel_t0, axis=-1).tolist()
 
         return {
-            "positions": pos,
-            "faces": cells,
+            "positions":    pos,
+            "faces":        cells_local,
             "field_values": field_values,
-            "node_type": node_type,
-            "n_nodes": end - start,
-            "n_faces": len(cells),
+            "node_type":    node_type,
+            "n_nodes":      end - start,
+            "n_faces":      len(cells_local),
         }
 
 

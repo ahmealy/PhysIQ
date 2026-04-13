@@ -739,8 +739,14 @@ async def train_stream():
         seen_epochs: set[int] = set()
         best_loss = float("inf")
         dead_polls = 0
+        stream_start = asyncio.get_event_loop().time()
+        # For remote jobs the SSH launcher + nohup startup takes 5-15s before
+        # train.py writes anything to the log.  Suppress the dead_polls timeout
+        # for the first 60s after the stream opens so we don't falsely error.
+        STARTUP_GRACE_SECONDS = 60
 
         while True:
+            elapsed_since_start = asyncio.get_event_loop().time() - stream_start
             epochs = await asyncio.get_running_loop().run_in_executor(
                 None, _parse_log, state.train_log_path
             )
@@ -772,6 +778,12 @@ async def train_stream():
                     yield "data: %s\n\n" % json.dumps({"type": "done", "reason": "completed"})
                     break
                 else:
+                    # Don't declare failure during startup grace period — remote
+                    # jobs take up to 60s before the first log line appears.
+                    if elapsed_since_start < STARTUP_GRACE_SECONDS:
+                        yield ": ping\n\n"
+                        await asyncio.sleep(5)
+                        continue
                     dead_polls += 1
                     if dead_polls >= 3:
                         state.clear_train_pid()

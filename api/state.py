@@ -96,11 +96,18 @@ def get_orphan_pid() -> Optional[int]:
                     time.time() - os.path.getmtime(_train_heartbeat_file)
                     if os.path.exists(_train_heartbeat_file) else 9999
                 )
-                alive = log_age < 3600 or heartbeat_age < 180
+                # Use heartbeat as the primary liveness signal (touched every 60s).
+                # Log age alone is unreliable: training can finish and the log stays
+                # fresh, causing a false "alive" for up to 3600s and blocking restart.
+                # Grace period: for the first 90s after launch the heartbeat may not
+                # exist yet (launcher writes it after the first 60s tick), so also
+                # treat a very fresh log as alive during that startup window.
+                startup_grace = log_age < 90
+                heartbeat_alive = heartbeat_age < 180
+                alive = heartbeat_alive or startup_grace
                 if alive:
-                    # Log or heartbeat updated recently — training is alive
                     return remote_pid
-                # Both log and heartbeat stale — training likely finished/died
+                # Heartbeat stale and past startup grace — training finished/died
                 clear_train_pid()
                 return None
         except (ValueError, OSError):

@@ -20,33 +20,46 @@ _samples_cache: dict = {}
 
 
 @router.get("/info")
-def dataset_info(domain: str = "cylinder_flow", split: str = "test"):
+def dataset_info(domain: str = "cylinder_flow", split: str = "train"):
     if domain not in DOMAINS:
         raise HTTPException(404, "Unknown domain: %s" % domain)
-
     cfg = DOMAINS[domain]
     if not cfg["available"]:
         raise HTTPException(400, "Domain '%s' is not available yet" % domain)
 
-    data_dir = cfg["data_dir"]
-    npz_path = os.path.join(data_dir, "%s.npz" % split)
-    if not os.path.exists(npz_path):
-        raise HTTPException(404, "Dataset not found: %s" % npz_path)
-
-    meta = np.load(npz_path, allow_pickle=True)
-    indices = meta["indices"]
-    n_trajectories = len(indices) - 1
-    velocity_shape = meta["all_velocity_shape"]
-    timesteps = int(velocity_shape[1])
-
-    return {
-        "domain":                   domain,
-        "split":                    split,
-        "num_trajectories":         n_trajectories,
-        "timesteps_per_trajectory": timesteps,
-        "dt":                       cfg["dt"],
-        "total_samples":            n_trajectories * (timesteps - 1),
-    }
+    if domain == "flag_simple":
+        data_dir = cfg["data_dir"]
+        index_path = os.path.join(data_dir, f"{split}_index.npz")
+        if not os.path.exists(index_path):
+            raise HTTPException(404, "Cloth index not found: %s" % index_path)
+        idx = np.load(index_path)
+        n_traj = int(idx["n_traj"])
+        steps = idx["steps_per_traj"]  # array of per-traj step counts
+        timesteps = int(np.median(steps)) if hasattr(steps, '__len__') else int(steps)
+        return {
+            "domain": domain, "split": split,
+            "num_trajectories": n_traj,
+            "timesteps_per_trajectory": timesteps,
+            "dt": cfg["dt"],
+            "total_samples": int(np.sum(steps - 1)) if hasattr(steps, '__len__') else n_traj * (timesteps - 1),
+        }
+    else:
+        data_dir = cfg["data_dir"]
+        npz_path = os.path.join(data_dir, "%s.npz" % split)
+        if not os.path.exists(npz_path):
+            raise HTTPException(404, "Dataset not found: %s" % npz_path)
+        meta = np.load(npz_path, allow_pickle=True)
+        indices = meta["indices"]
+        n_trajectories = len(indices) - 1
+        velocity_shape = meta["all_velocity_shape"]
+        timesteps = int(velocity_shape[1])
+        return {
+            "domain": domain, "split": split,
+            "num_trajectories": n_trajectories,
+            "timesteps_per_trajectory": timesteps,
+            "dt": cfg["dt"],
+            "total_samples": n_trajectories * (timesteps - 1),
+        }
 
 
 def _compute_samples(npz_path: str, dat_path: str) -> dict:
@@ -100,14 +113,28 @@ def _compute_samples(npz_path: str, dat_path: str) -> dict:
     unflagged_sample = [o for o in outliers if not o["flag"]][:max(0, 50 - len(flagged))]
     outlier_table = sorted(flagged + unflagged_sample, key=lambda x: abs(x["z_score"]), reverse=True)
 
+    # Node type breakdown from mesh metadata
+    try:
+        node_type_raw = meta["node_type"]  # [N_total, 1] or [N_total]
+        nt = node_type_raw.flatten().astype(np.int32)
+        node_type_counts = {}
+        for name, val in [("NORMAL",0),("OBSTACLE",1),("AIRFOIL",2),("HANDLE",3),
+                          ("INFLOW",4),("OUTFLOW",5),("WALL_BOUNDARY",6)]:
+            c = int(np.sum(nt == val))
+            if c > 0:
+                node_type_counts[name] = c
+    except Exception:
+        node_type_counts = {}
+
     return {
-        "velocity_bins":   velocity_bins,
-        "energy_bins":     energy_bins,
-        "node_count_bins": node_count_bins,
-        "outliers":        outlier_table,
-        "n_trajectories":  n_trajectories,
-        "total_nodes":     int(node_counts.sum()),
-        "mean_nodes":      round(float(node_counts.mean()), 1),
+        "velocity_bins":    velocity_bins,
+        "energy_bins":      energy_bins,
+        "node_count_bins":  node_count_bins,
+        "outliers":         outlier_table,
+        "n_trajectories":   n_trajectories,
+        "total_nodes":      int(node_counts.sum()),
+        "mean_nodes":       round(float(node_counts.mean()), 1),
+        "node_type_counts": node_type_counts,
     }
 
 
@@ -183,14 +210,30 @@ def _compute_samples_flag(data_dir: str, split: str) -> dict:
     outlier_table = sorted(flagged + unflagged, key=lambda x: abs(x["z_score"]), reverse=True)
 
     valid_nc = node_counts_arr[node_counts_arr > 0]
+
+    # Node type breakdown — load from first available trajectory
+    node_type_counts = {}
+    try:
+        first_path = os.path.join(split_dir, "traj_00000.npz")
+        if os.path.exists(first_path):
+            traj0 = np.load(first_path)
+            nt = traj0["node_type"].flatten().astype(np.int32)
+            for name, val in [("NORMAL",0),("HANDLE",3)]:
+                c = int(np.sum(nt == val))
+                if c > 0:
+                    node_type_counts[name] = c
+    except Exception:
+        pass
+
     return {
-        "velocity_bins":   velocity_bins,
-        "energy_bins":     energy_bins,
-        "node_count_bins": node_count_bins,
-        "outliers":        outlier_table,
-        "n_trajectories":  n_traj,
-        "total_nodes":     int(valid_nc.sum()) if len(valid_nc) else 0,
-        "mean_nodes":      round(float(valid_nc.mean()), 1) if len(valid_nc) else 0,
+        "velocity_bins":    velocity_bins,
+        "energy_bins":      energy_bins,
+        "node_count_bins":  node_count_bins,
+        "outliers":         outlier_table,
+        "n_trajectories":   n_traj,
+        "total_nodes":      int(valid_nc.sum()) if len(valid_nc) else 0,
+        "mean_nodes":       round(float(valid_nc.mean()), 1) if len(valid_nc) else 0,
+        "node_type_counts": node_type_counts,
     }
 
 
@@ -231,6 +274,65 @@ async def dataset_samples(domain: str = "cylinder_flow", split: str = "test"):
         )
     _samples_cache[cache_key] = result
     return result
+
+
+@router.get("/mesh_preview")
+async def mesh_preview(domain: str = "cylinder_flow", trajectory: int = 0):
+    """Return mesh positions, faces, and field values for one sample frame for visualization."""
+    if domain not in DOMAINS:
+        raise HTTPException(404, "Unknown domain: %s" % domain)
+    cfg = DOMAINS[domain]
+    if not cfg["available"]:
+        raise HTTPException(400, "Domain '%s' is not available yet" % domain)
+
+    if domain == "flag_simple":
+        data_dir = cfg["data_dir"]
+        traj_path = os.path.join(data_dir, "train", f"traj_{trajectory:05d}.npz")
+        if not os.path.exists(traj_path):
+            raise HTTPException(404, "Trajectory not found: %s" % traj_path)
+        traj = np.load(traj_path)
+        mesh_pos = traj["mesh_pos"].tolist()          # [N, 2]
+        faces = traj["cells"].astype(int).tolist()    # [F, 3]
+        world_pos_t0 = traj["world_pos"][0]            # [N, 3]
+        field_values = np.linalg.norm(world_pos_t0, axis=-1).tolist()  # [N]
+        node_type = traj["node_type"].flatten().astype(int).tolist()
+        return {
+            "positions": mesh_pos,
+            "faces": faces,
+            "field_values": field_values,
+            "node_type": node_type,
+            "n_nodes": len(mesh_pos),
+            "n_faces": len(faces),
+        }
+    else:
+        data_dir = cfg["data_dir"]
+        npz_path = os.path.join(data_dir, "train.npz")
+        if not os.path.exists(npz_path):
+            raise HTTPException(404, "Dataset not found")
+        meta = np.load(npz_path, allow_pickle=True)
+        indices = meta["indices"]
+        if trajectory >= len(indices) - 1:
+            raise HTTPException(400, "Trajectory index out of range")
+        start, end = int(indices[trajectory]), int(indices[trajectory + 1])
+        pos = meta["pos"][start:end].tolist()          # [N, 2]
+        node_type = meta["node_type"][start:end].flatten().astype(int).tolist()
+        cells = meta["cells"].astype(int).tolist() if "cells" in meta else []
+
+        # Load velocity at t=0
+        velocity_shape = tuple(meta["all_velocity_shape"])
+        dat_path = npz_path.replace(".npz", ".dat")
+        all_velocity = np.memmap(dat_path, dtype="float32", mode="r", shape=velocity_shape)
+        vel_t0 = np.array(all_velocity[start:end, 0, :])  # [N, 2]
+        field_values = np.linalg.norm(vel_t0, axis=-1).tolist()
+
+        return {
+            "positions": pos,
+            "faces": cells,
+            "field_values": field_values,
+            "node_type": node_type,
+            "n_nodes": end - start,
+            "n_faces": len(cells),
+        }
 
 
 @router.post("/flag_outliers")

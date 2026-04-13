@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Database, Info, AlertTriangle, CheckCircle2, BarChart2, Loader2, Flag } from 'lucide-react';
+import { Database, Info, AlertTriangle, CheckCircle2, BarChart2, Loader2, Flag, Layers, Clock, Hash } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { MeshPlot } from '../components/MeshPlot';
 
 const cn = (...classes: any[]) => classes.filter(Boolean).join(' ');
 
@@ -17,6 +18,9 @@ export const DatasetStudio: React.FC = () => {
   const [elapsed, setElapsed] = useState(0);
   const [flagging, setFlagging] = useState(false);
   const [flagResult, setFlagResult] = useState<any>(null);
+  const [info, setInfo] = useState<any>(null);
+  const [preview, setPreview] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const timerRef = useRef<any>(null);
 
   // Load available domains once
@@ -33,6 +37,8 @@ export const DatasetStudio: React.FC = () => {
     setError(null);
     setFlagResult(null);
     setElapsed(0);
+    setInfo(null);
+    setPreview(null);
     clearInterval(timerRef.current);
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
 
@@ -49,6 +55,17 @@ export const DatasetStudio: React.FC = () => {
         clearInterval(timerRef.current);
         setError(e.message);
       });
+
+    fetch(`/api/dataset/info?domain=${domain}&split=train`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setInfo(d))
+      .catch(() => {});
+
+    setPreviewLoading(true);
+    fetch(`/api/dataset/mesh_preview?domain=${domain}&trajectory=0`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { setPreview(d); setPreviewLoading(false); })
+      .catch(() => { setPreviewLoading(false); });
 
     return () => clearInterval(timerRef.current);
   }, [domain]);
@@ -162,6 +179,26 @@ export const DatasetStudio: React.FC = () => {
       {/* Charts */}
       {data && (
         <>
+          {/* Dataset Info Bar */}
+          {info && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { icon: <Hash className="w-3.5 h-3.5 text-blue-400" />, label: 'Trajectories', value: info.num_trajectories.toLocaleString() },
+                { icon: <Clock className="w-3.5 h-3.5 text-green-400" />, label: 'Steps / Trajectory', value: info.timesteps_per_trajectory.toLocaleString() },
+                { icon: <Layers className="w-3.5 h-3.5 text-purple-400" />, label: 'Total Samples', value: info.total_samples.toLocaleString() },
+                { icon: <Clock className="w-3.5 h-3.5 text-amber-400" />, label: 'Time Span', value: `${(info.timesteps_per_trajectory * info.dt).toFixed(1)}s  (dt=${info.dt}s)` },
+              ].map(item => (
+                <div key={item.label} className="bg-slate-900/50 border border-slate-800 rounded-xl px-4 py-3 flex items-center gap-3">
+                  {item.icon}
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">{item.label}</p>
+                    <p className="text-sm font-bold text-white font-mono">{item.value}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
               <div className="flex items-center justify-between">
@@ -247,6 +284,81 @@ export const DatasetStudio: React.FC = () => {
               </div>
             </section>
           )}
+
+          {/* Node Type Breakdown + Mesh Preview */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Node Type Breakdown */}
+            {data.node_type_counts && Object.keys(data.node_type_counts).length > 0 && (
+              <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
+                <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
+                  <Layers className="w-4 h-4 text-amber-400" />
+                  Node Type Breakdown
+                </h3>
+                <div className="space-y-2">
+                  {(() => {
+                    const colors: Record<string, string> = {
+                      NORMAL: '#3b82f6', OBSTACLE: '#ef4444', AIRFOIL: '#8b5cf6',
+                      HANDLE: '#f59e0b', INFLOW: '#10b981', OUTFLOW: '#06b6d4',
+                      WALL_BOUNDARY: '#6b7280',
+                    };
+                    const total = Object.values(data.node_type_counts as Record<string, number>).reduce((a: number, b: number) => a + b, 0);
+                    return Object.entries(data.node_type_counts as Record<string, number>).map(([name, count]) => (
+                      <div key={name} className="flex items-center gap-3">
+                        <div className="w-20 shrink-0 text-[10px] font-bold text-slate-400 uppercase">{name}</div>
+                        <div className="flex-1 bg-slate-800 rounded-full h-2 overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{ width: `${(count / total * 100).toFixed(1)}%`, backgroundColor: colors[name] ?? '#64748b' }}
+                          />
+                        </div>
+                        <div className="w-24 text-right text-[10px] font-mono text-slate-400">
+                          {count.toLocaleString()} <span className="text-slate-600">({(count / total * 100).toFixed(1)}%)</span>
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </section>
+            )}
+
+            {/* Mesh Preview */}
+            <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
+                  <Database className="w-4 h-4 text-cyan-400" />
+                  Sample Mesh Preview
+                </h3>
+                {preview && (
+                  <span className="text-[10px] text-slate-500 font-bold uppercase">
+                    {preview.n_nodes.toLocaleString()} nodes · {preview.n_faces.toLocaleString()} faces
+                  </span>
+                )}
+              </div>
+              {previewLoading && (
+                <div className="h-48 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 animate-spin text-slate-500" />
+                </div>
+              )}
+              {preview && !previewLoading && (
+                <div className="h-48">
+                  <MeshPlot
+                    crds={preview.positions as [number, number][]}
+                    triangles={preview.faces as [number, number, number][]}
+                    values={preview.field_values}
+                    title=""
+                    minVal={Math.min(...preview.field_values)}
+                    maxVal={Math.max(...preview.field_values)}
+                    domain={domain}
+                  />
+                </div>
+              )}
+              {!preview && !previewLoading && (
+                <div className="h-48 flex items-center justify-center text-slate-600 text-sm">
+                  No preview available
+                </div>
+              )}
+            </section>
+          </div>
 
           {/* Outlier table */}
           <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">

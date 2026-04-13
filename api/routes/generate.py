@@ -34,10 +34,9 @@ import io
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import numpy as np
-import torch
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -108,7 +107,7 @@ class BaseDesignSampler(ABC):
 
     @abstractmethod
     def sample(self, target: float, n: int, device: str,
-               method: str = "sample") -> list[CandidateResult]:
+               method: str = "sample") -> tuple[list[CandidateResult], list]:
         """
         Generate n design candidates aiming for the given physics target.
 
@@ -138,12 +137,7 @@ class CFDDesignSampler(BaseDesignSampler):
         """
         Generate n candidates using the CVAE + MLP surrogate.
         """
-        return self._quick_sample(target, n, device, method)
-
-    def _quick_sample(self, target: float, n: int, device: str,
-                      method: str = "sample") -> tuple[list, list]:
         import torch
-        import torch.nn.functional as F
         from extensions.generative.cvae_cfd import CVAETrainer
         from extensions.generative.drag_surrogate import DragSurrogateTrainer
         from extensions.generative.mesh_generator import CFDMeshBuilder
@@ -629,15 +623,10 @@ async def generate(req: GenerateRequest):
             loop = asyncio.get_running_loop()
             results, trajectory = await loop.run_in_executor(
                 None,
-                lambda: sampler._quick_sample(req.target_value,
-                                              req.n_candidates,
-                                              req.device,
-                                              req.method)
-                if hasattr(sampler, "_quick_sample")
-                else sampler.sample(req.target_value,
-                                    req.n_candidates,
-                                    req.device,
-                                    req.method)
+                lambda: sampler.sample(req.target_value,
+                                       req.n_candidates,
+                                       req.device,
+                                       req.method)
             )
 
             # Stream optimisation trajectory first (gradient mode only)

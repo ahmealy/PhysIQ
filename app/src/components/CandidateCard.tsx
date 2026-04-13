@@ -131,7 +131,7 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
           </div>
         ))}
 
-        {/* Analyze button — only shown when sessionId available (CFD domain) */}
+        {/* Analyze button — only shown when sessionId available */}
         {sessionId && onAnalyze && (
           <button
             onClick={handleAnalyze}

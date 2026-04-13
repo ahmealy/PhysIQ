@@ -263,6 +263,8 @@ def train_start(config: TrainConfig):
     # Also block if an orphaned process from a previous server session is still alive
     orphan = state.get_orphan_pid()
     if orphan:
+        if orphan == -1:
+            raise HTTPException(409, "Training is already starting (launch in progress)")
         raise HTTPException(409, "Training is already running (PID %d, orphaned from previous session)" % orphan)
 
     if config.domain not in state.DOMAINS:
@@ -274,6 +276,10 @@ def train_start(config: TrainConfig):
 
     # Switch all domain-scoped file paths (log, pid, heartbeat) to the new domain
     state.set_active_domain(config.domain)
+
+    # Write launching sentinel IMMEDIATELY so concurrent /start calls are blocked
+    # for up to 120s while SSH setup completes and the real PID file is written.
+    state.mark_train_launching()
 
     # Write config JSON for train.py to consume
     os.makedirs("runs", exist_ok=True)
@@ -385,16 +391,22 @@ def train_start(config: TrainConfig):
             except Exception:
                 pass
             finally:
-                # Write PID file once SSH completes (may be a few seconds after response)
+                # Write PID file once SSH completes (may be a few seconds after response).
+                # save_train_pid() also removes the launching sentinel.
                 pid_to_save = remote_pid_holder[0] if remote_pid_holder else 0
                 state.save_train_pid(pid_to_save)
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=log_file,
-            cwd=project_root,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=log_file,
+                cwd=project_root,
+            )
+        except Exception as e:
+            log_file.close()
+            state.clear_train_pid()   # removes launching sentinel
+            raise HTTPException(500, "Failed to launch training: %s" % str(e))
         log_file.close()
         t = threading.Thread(target=_ssh_wait, daemon=True)
         t.start()
@@ -404,15 +416,20 @@ def train_start(config: TrainConfig):
         state.clear_model_cache()
         return {"pid": None, "status": "started", "execution": execution}
     else:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            cwd=project_root,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=project_root,
+            )
+        except Exception as e:
+            log_file.close()
+            state.clear_train_pid()   # removes launching sentinel
+            raise HTTPException(500, "Failed to launch training: %s" % str(e))
         log_file.close()
         state.train_process = proc
-        state.save_train_pid(proc.pid)
+        state.save_train_pid(proc.pid)   # also removes launching sentinel
         state.save_train_start_time()   # record launch timestamp for elapsed timer
         state.clear_model_cache()
         return {"pid": proc.pid, "status": "started", "execution": execution}

@@ -25,7 +25,7 @@ def _runs_path(filename: str) -> str:
 
 def set_active_domain(domain: str) -> None:
     global _active_domain, train_log_path, _train_pid_file, _train_remote_pid_file, \
-           _train_start_time_file, _train_heartbeat_file
+           _train_start_time_file, _train_heartbeat_file, _train_launching_file
     _active_domain = domain
     slug = domain.replace("_", "")          # cylinder_flow → cylinderflow, flag_simple → flagsimple
     train_log_path          = _runs_path(f"train_{slug}.log")
@@ -33,6 +33,7 @@ def set_active_domain(domain: str) -> None:
     _train_remote_pid_file  = _runs_path(f"train_{slug}_remote.pid")
     _train_start_time_file  = _runs_path(f"train_{slug}_start.txt")
     _train_heartbeat_file   = _runs_path(f"train_{slug}_heartbeat")
+    _train_launching_file   = _runs_path(f"train_{slug}_launching")
 
 # Initialise with default domain
 set_active_domain(_active_domain)
@@ -42,6 +43,24 @@ def save_train_pid(pid: int) -> None:
     os.makedirs(os.path.join(_project_root, "runs"), exist_ok=True)
     with open(_train_pid_file, "w") as f:
         f.write(str(pid))
+    # Real PID is now recorded — remove the "launching" sentinel if present
+    try:
+        os.remove(_train_launching_file)
+    except FileNotFoundError:
+        pass
+
+
+def mark_train_launching() -> None:
+    """Write a sentinel immediately when training is being launched.
+
+    Prevents duplicate process spawns during the SSH setup window (5-15s)
+    before the remote PID file is written by the launcher script.
+    The sentinel is automatically removed by save_train_pid() once the real
+    PID is known, or by clear_train_pid() if the launch is aborted.
+    """
+    os.makedirs(os.path.join(_project_root, "runs"), exist_ok=True)
+    with open(_train_launching_file, "w") as f:
+        f.write(str(int(time.time())))
 
 
 def save_train_start_time(ms: int | None = None) -> None:
@@ -62,7 +81,8 @@ def get_train_start_time() -> int | None:
 
 def clear_train_pid() -> None:
     for path in (_train_pid_file, _train_remote_pid_file,
-                 _train_start_time_file, _train_heartbeat_file):
+                 _train_start_time_file, _train_heartbeat_file,
+                 _train_launching_file):
         try:
             os.remove(path)
         except FileNotFoundError:
@@ -80,7 +100,25 @@ def get_orphan_pid() -> Optional[int]:
          OR the log is actively growing (mtime recent relative to file age)
     If the log hasn't been touched for >120s and remote pid file exists,
     we assume it finished or died and clean up.
+
+    Also checks the launching sentinel (_train_launching_file) which is written
+    immediately at train_start before the SSH process is spawned, preventing
+    duplicate starts during the ~5-15s SSH setup window.
     """
+    # Check launching sentinel first — written synchronously at train_start,
+    # before any SSH or subprocess activity.  Expire after 120s to avoid
+    # permanent blocking if the server crashed mid-launch.
+    if os.path.exists(_train_launching_file):
+        try:
+            ts = int(open(_train_launching_file).read().strip())
+            age = time.time() - ts
+            if age < 120:
+                return -1   # sentinel: "a launch is in progress"
+            # Stale sentinel — clean up
+            os.remove(_train_launching_file)
+        except (ValueError, OSError):
+            pass
+
     # Check remote PID file first
     if os.path.exists(_train_remote_pid_file):
         try:

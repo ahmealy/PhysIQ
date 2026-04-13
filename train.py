@@ -165,11 +165,19 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
         )
     ckpt_architecture = ckpt.get('architecture', 'gn')
     if ckpt_architecture != architecture:
-        raise RuntimeError(
-            f"Checkpoint architecture '{ckpt_architecture}' does not match current "
-            f"architecture '{architecture}'. Delete the checkpoint or update --config."
+        print(
+            f"Architecture changed ('{ckpt_architecture}' → '{architecture}'). "
+            "Starting from scratch."
         )
-    model.load_state_dict(ckpt['model_state_dict'])
+        return 1, float('inf')
+    try:
+        model.load_state_dict(ckpt['model_state_dict'])
+    except RuntimeError as e:
+        print(
+            f"Checkpoint weights incompatible with current model ({e}). "
+            "Starting from scratch."
+        )
+        return 1, float('inf')
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     start_epoch = ckpt['epoch'] + 1
     best_valid_loss = ckpt['valid_loss']

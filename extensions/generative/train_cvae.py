@@ -24,6 +24,7 @@ Design principles
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import argparse
@@ -101,11 +102,52 @@ class CFDStrategy(CVAEStrategy):
 
     def train(self, design: np.ndarray, targets: np.ndarray,
               args: argparse.Namespace) -> None:
-        from extensions.generative.drag_surrogate import DragSurrogateTrainer
+        from extensions.generative.drag_surrogate import (
+            DragSurrogateTrainer, extract_true_drag,
+        )
         from extensions.generative.cvae_cfd import CVAEConfig, CFDCVAE, CVAETrainer
 
         surrogate_trainer = DragSurrogateTrainer.load(args.surrogate_out,
                                                        device=args.device)
+
+        # ── Try to enrich labels with physics-accurate drag from GNN rollouts ──
+        # Only attempt this if a trained simulator checkpoint is available.
+        true_drag_labels: dict[int, float] = {}
+        _ckpt = getattr(args, 'simulator_ckpt', None) or 'checkpoints/best_model.pth'
+        if os.path.exists(_ckpt):
+            try:
+                from model.simulator import Simulator
+                from dataset import FpcDataset
+                import torch
+
+                _device = args.device
+                _sim = Simulator(
+                    message_passing_num=15,
+                    node_input_size=11,
+                    edge_input_size=3,
+                    device=_device,
+                )
+                _state = torch.load(_ckpt, map_location=_device, weights_only=False)
+                _sim.load_state_dict(_state['model_state_dict'])
+                _sim.eval()
+
+                _dataset = FpcDataset(args.data_dir, split=args.split)
+                n_traj = len(_dataset) // _dataset.num_sampes_per_tra
+                print(f"  Extracting true drag labels from {n_traj} GNN rollouts …")
+                for i in range(min(n_traj, len(design))):
+                    try:
+                        drag = extract_true_drag(
+                            _sim, _dataset, i, device=_device,
+                        )
+                        if not math.isnan(drag):
+                            true_drag_labels[i] = drag
+                    except Exception:
+                        pass  # fallback to analytical for this trajectory
+                print(f"  Got true drag for {len(true_drag_labels)}/{min(n_traj, len(design))} "
+                      f"trajectories (rest use analytical formula)")
+            except Exception:
+                pass  # no simulator available — use analytical formula entirely
+
         cfg     = CVAEConfig(
             latent_dim=args.latent_dim,
             epochs=args.epochs,

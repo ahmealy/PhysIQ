@@ -28,6 +28,7 @@ Design principles
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import argparse
@@ -38,7 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _PROJECT_ROOT not in sys.path:
@@ -77,6 +78,114 @@ class DragProxyComputer:
         blockage = np.clip(2.0 * r / H, 0.0, 0.99)
         drag     = r * v ** 2 / (1.0 - blockage)
         return drag.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# True drag extraction from GNN rollouts
+# ---------------------------------------------------------------------------
+
+def extract_true_drag(
+    simulator,
+    dataset,
+    trajectory_index: int,
+    device: str = 'cpu',
+    steady_state_frac: float = 0.3,
+) -> float:
+    """
+    Run a GNN rollout on the given trajectory and extract true drag.
+
+    True drag = mean(|vx|) over OUTFLOW nodes at steady state.
+    OUTFLOW nodes have node_type == 5 (NodeType.OUTFLOW).
+
+    Args:
+        simulator:          trained GNN simulator (Simulator or similar).
+                            Passed as argument to avoid circular imports.
+        dataset:            CFD dataset (FpcDataset or similar).
+        trajectory_index:   which trajectory to roll out.
+        device:             torch device string.
+        steady_state_frac:  fraction of final steps used for averaging
+                            (default 0.3 = last 30 % of the rollout).
+
+    Returns:
+        float drag value (mean |vx| over OUTFLOW nodes at steady state),
+        or float('nan') if the rollout fails or produces non-finite values.
+    """
+    # Lazy import to avoid circular dependency — NodeType lives in utils.utils
+    # which does not import anything from extensions/.
+    try:
+        from utils.utils import NodeType
+        _OUTFLOW_TYPE = int(NodeType.OUTFLOW)
+    except Exception:
+        _OUTFLOW_TYPE = 5  # fallback constant
+
+    try:
+        import torch_geometric.transforms as T
+
+        n_steps: int = dataset.num_sampes_per_tra
+
+        # PyG transforms used during training / rollout
+        transformer = T.Compose([
+            T.FaceToEdge(),
+            T.Cartesian(norm=False),
+            T.Distance(norm=False),
+        ])
+
+        predicted_velocity = None
+        boundary_mask      = None
+        outflow_mask       = None
+        vx_history: list[float] = []   # mean |vx| over OUTFLOW nodes at each step
+
+        simulator.eval()
+
+        with torch.no_grad():
+            for i in range(n_steps):
+                idx   = trajectory_index * n_steps + i
+                graph = dataset[idx]
+                graph = transformer(graph)
+                graph = graph.to(device)
+
+                # Build masks once (topology is fixed for cylinder_flow)
+                if boundary_mask is None:
+                    node_type    = graph.x[:, 0]
+                    fluid_mask   = torch.logical_or(
+                        node_type == 0,          # NodeType.NORMAL
+                        node_type == _OUTFLOW_TYPE,
+                    )
+                    boundary_mask = torch.logical_not(fluid_mask)
+                    outflow_mask  = (node_type == _OUTFLOW_TYPE)
+
+                # Autoregressive: substitute own prediction from previous step
+                if predicted_velocity is not None:
+                    graph.x[:, 1:3] = predicted_velocity.detach()
+
+                predicted_velocity = simulator(graph, velocity_sequence_noise=None)
+
+                # Pin boundary nodes to ground truth
+                predicted_velocity[boundary_mask] = graph.y[boundary_mask]
+
+                # Record mean |vx| over OUTFLOW nodes
+                if outflow_mask.any():
+                    vx_out = predicted_velocity[outflow_mask, 0].abs().mean().item()
+                else:
+                    # No OUTFLOW nodes — fall back to all fluid nodes
+                    vx_out = predicted_velocity[:, 0].abs().mean().item()
+
+                vx_history.append(vx_out)
+
+        if not vx_history:
+            return float('nan')
+
+        # Average over the last steady_state_frac of steps
+        n_steady = max(1, int(len(vx_history) * steady_state_frac))
+        drag_val = float(np.mean(vx_history[-n_steady:]))
+
+        if not math.isfinite(drag_val):
+            return float('nan')
+
+        return drag_val
+
+    except Exception:
+        return float('nan')
 
 
 # ---------------------------------------------------------------------------
@@ -184,19 +293,37 @@ class DragSurrogateTrainer:
         self._device = device
         self._scaler = MinMaxScaler()
 
-    def fit(self, X: np.ndarray, y: np.ndarray,
+    def fit(self, X: np.ndarray, y: Optional[np.ndarray] = None,
+            true_drag_labels: Optional[Dict[int, float]] = None,
             verbose: bool = True) -> list[float]:
         """
         Train the surrogate.
 
         Args:
-            X: [N, 4] design parameters
-            y: [N]    drag proxy targets
-            verbose: print loss every 20 epochs
+            X:                [N, 4] design parameters (cx, cy, r, v_inlet)
+            y:                [N]    analytical drag proxy targets (fallback).
+                              If None, computed automatically via DragProxyComputer.
+            true_drag_labels: optional dict mapping trajectory index → true drag
+                              float extracted from a GNN rollout.  When provided,
+                              these values override the analytical formula for the
+                              corresponding rows.  Missing indices fall back to
+                              the analytical formula.
+            verbose:          print loss every 20 epochs
 
         Returns:
             list of per-epoch training losses
         """
+        # Build analytical labels if not provided
+        if y is None:
+            y = DragProxyComputer()(X)
+
+        # Override with physics-accurate true drag labels where available
+        if true_drag_labels:
+            y = y.copy()  # don't mutate the caller's array
+            for traj_idx, drag_val in true_drag_labels.items():
+                if 0 <= traj_idx < len(y) and math.isfinite(drag_val):
+                    y[traj_idx] = np.float32(drag_val)
+
         self._scaler.fit(X, y)
         X_n = self._scaler.transform_X(X).astype(np.float32)
         y_n = self._scaler.transform_y(y).astype(np.float32)

@@ -210,11 +210,18 @@ class CFDDesignSampler(BaseDesignSampler):
         # ── OOD detector (optional) ──────────────────────────────────────────
         cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
         detector = None
+        # Try domain-scoped index first (written by current train.py),
+        # fall back to legacy non-scoped name for backward compatibility.
+        _ood_index_path = (
+            "runs/embedding_index_cylinderflow.pkl"
+            if os.path.exists("runs/embedding_index_cylinderflow.pkl")
+            else "runs/embedding_index.pkl"
+        )
         try:
             sim = get_model(cfd_ckpt, device=device) if os.path.exists(cfd_ckpt) else None
-            if sim is not None and os.path.exists("runs/embedding_index.pkl"):
+            if sim is not None and os.path.exists(_ood_index_path):
                 detector = OODDetector.from_index_file(
-                    "runs/embedding_index.pkl", simulator=sim, device=device
+                    _ood_index_path, simulator=sim, device=device
                 )
         except Exception as _ood_exc:
             import logging as _log

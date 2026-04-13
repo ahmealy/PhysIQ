@@ -456,40 +456,47 @@ async def run_rollout(req: RolloutRequest):
                     })
                     return
 
-                # ── scp the result file back from remote ──────────────────
+                # ── copy the result file from remote if needed ────────────
                 if done_payload:
                     remote_pkl = done_payload.get("pkl_path", "")
                     if remote_pkl:
                         os.makedirs("result", exist_ok=True)
-                        local_pkl = os.path.join(
-                            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                            remote_pkl,
+                        project_root_local = os.path.dirname(
+                            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                         )
-                        host     = remote_cfg.get("host", "")
-                        port     = str(remote_cfg.get("port", 22))
-                        user     = remote_cfg.get("user", "")
-                        key_file = remote_cfg.get("key_file", "")
-                        scp_cmd  = ["scp", "-P", port,
-                                    "-o", "StrictHostKeyChecking=no",
-                                    "-o", "BatchMode=yes"]
-                        if key_file:
-                            scp_cmd += ["-i", key_file]
-                        remote_src = "%s@%s:%s" % (user, host, remote_pkl)
-                        scp_cmd += [remote_src, local_pkl]
+                        local_pkl = os.path.join(project_root_local, remote_pkl)
 
-                        scp_rc = await loop.run_in_executor(
-                            None,
-                            lambda: subprocess.run(scp_cmd, capture_output=True).returncode,
-                        )
-                        if scp_rc != 0:
-                            yield "data: %s\n\n" % json.dumps({
-                                "type":    "error",
-                                "message": "Rollout finished on remote but scp of result failed (rc=%d). "
-                                           "File is at %s on the remote host." % (scp_rc, remote_pkl),
-                            })
-                            return
+                        if os.path.exists(local_pkl):
+                            # Shared filesystem (NFS) — file already present locally, skip scp
+                            pass
+                        else:
+                            # Non-shared filesystem — scp the file back
+                            host     = remote_cfg.get("host", "")
+                            port     = str(remote_cfg.get("port", 22))
+                            user     = remote_cfg.get("user", "").strip()
+                            key_file = remote_cfg.get("key_file", "")
+                            scp_cmd  = ["scp", "-P", port,
+                                        "-o", "StrictHostKeyChecking=no",
+                                        "-o", "BatchMode=yes"]
+                            if key_file:
+                                scp_cmd += ["-i", key_file]
+                            remote_src = ("%s@%s:%s" % (user, host, remote_pkl)
+                                          if user else "%s:%s" % (host, remote_pkl))
+                            scp_cmd += [remote_src, local_pkl]
 
-                        # Update pkl_path to local path before yielding done
+                            scp_rc = await loop.run_in_executor(
+                                None,
+                                lambda: subprocess.run(scp_cmd, capture_output=True).returncode,
+                            )
+                            if scp_rc != 0:
+                                yield "data: %s\n\n" % json.dumps({
+                                    "type":    "error",
+                                    "message": "Rollout finished on remote but scp of result failed (rc=%d). "
+                                               "File is at %s on the remote host." % (scp_rc, remote_pkl),
+                                })
+                                return
+
+                        # Update pkl_path to local absolute path before yielding done
                         done_payload["pkl_path"] = os.path.relpath(local_pkl)
 
                     yield "data: %s\n\n" % json.dumps(done_payload)

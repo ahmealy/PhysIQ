@@ -365,30 +365,44 @@ def train_start(config: TrainConfig):
         execution = "local"
 
     if _remote_ssh_active(remote_cfg):
-        # SSH exits immediately (nohup &); capture remote PID from stdout
+        # SSH exits immediately (nohup &); capture remote PID from stdout.
+        # Use a thread so we never block FastAPI's async event loop — the SSH
+        # handshake + launcher script takes a few seconds and must not tie up
+        # the request beyond the immediate Popen (response is sent right away).
+        import threading
+
+        remote_pid_holder: list[int] = []
+
+        def _ssh_wait():
+            try:
+                stdout, _ = proc.communicate(timeout=30)
+                for line in (stdout or b"").decode(errors="replace").splitlines():
+                    if line.startswith("REMOTE_PID:"):
+                        try:
+                            remote_pid_holder.append(int(line.split(":")[1].strip()))
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+            finally:
+                # Write PID file once SSH completes (may be a few seconds after response)
+                pid_to_save = remote_pid_holder[0] if remote_pid_holder else 0
+                state.save_train_pid(pid_to_save)
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=log_file,
             cwd=project_root,
         )
-        stdout, _ = proc.communicate(timeout=15)
         log_file.close()
-        # Parse REMOTE_PID:<n> from output
-        remote_pid = None
-        for line in (stdout or b"").decode(errors="replace").splitlines():
-            if line.startswith("REMOTE_PID:"):
-                try:
-                    remote_pid = int(line.split(":")[1].strip())
-                except ValueError:
-                    pass
-        # Store remote PID in the shared PID file so orphan detection works
-        pid_to_save = remote_pid or 0
-        state.save_train_pid(pid_to_save)
+        t = threading.Thread(target=_ssh_wait, daemon=True)
+        t.start()
+
         state.save_train_start_time()   # record launch timestamp for elapsed timer
-        state.train_process = None   # SSH proc already exited
+        state.train_process = None   # SSH proc will exit on its own
         state.clear_model_cache()
-        return {"pid": remote_pid, "status": "started", "execution": execution}
+        return {"pid": None, "status": "started", "execution": execution}
     else:
         proc = subprocess.Popen(
             cmd,
@@ -517,6 +531,10 @@ def _get_train_processes() -> list[dict]:
             cmd = p.info["cmdline"] or []
             # Match any process running train.py (our training script)
             if not any("train.py" in arg for arg in cmd):
+                continue
+            # Skip the ssh process itself — it has train.py in its args but is
+            # not the actual training process (remote job is already captured above)
+            if p.info["name"] in ("ssh", "ssh.exe"):
                 continue
             # Also exclude rollout_ssh.py / rollout.py which may contain "train" in path
             if any("rollout" in arg for arg in cmd):

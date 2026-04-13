@@ -69,7 +69,7 @@ class CVAEConfig:
     # Free-bits threshold: KL per latent dim is clamped to at least this value.
     # Prevents posterior collapse on unused dimensions.
     # 0.0 = disabled (standard KL); recommended value: 0.05
-    free_bits:    float = 0.0
+    free_bits:    float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,19 @@ class CFDCVAE(BaseCVAE):
         self.eval()
         device = next(self.parameters()).device
         with torch.no_grad():
-            z    = torch.randn(n, self.cfg.latent_dim, device=device)
+            # Latin Hypercube Sampling for better coverage of the latent space.
+            # Falls back to pure N(0,I) if scipy is unavailable.
+            try:
+                from scipy.stats import qmc
+                from scipy.stats import norm as scipy_norm
+                sampler    = qmc.LatinHypercube(d=self.cfg.latent_dim, seed=None)
+                lhs_samples = sampler.random(n=n)                    # [n, L] uniform [0,1]
+                z_np       = scipy_norm.ppf(
+                    np.clip(lhs_samples, 1e-6, 1 - 1e-6)
+                )                                                     # [n, L] ~ N(0,I)
+                z = torch.from_numpy(z_np.astype(np.float32)).to(device)
+            except Exception:
+                z = torch.randn(n, self.cfg.latent_dim, device=device)
             cond = target_drag.expand(n, 1).to(device)
             return self.decode(z, cond)
 

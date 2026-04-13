@@ -50,6 +50,13 @@ from extensions.generative.drag_surrogate import (   # noqa: E402
 )
 from extensions.generative.cloth_extractor import PosePCA  # noqa: E402
 
+try:
+    from scipy.stats import qmc as _qmc
+    from scipy.stats import norm as _scipy_norm
+    _SCIPY_QMC_AVAILABLE = True
+except (ImportError, AttributeError):
+    _SCIPY_QMC_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -222,6 +229,10 @@ class ClothCVAE(nn.Module):
         self.cfg     = cfg or ClothCVAEConfig()
         self.encoder = ClothEncoder(self.cfg)
         self.decoder = ClothDecoder(self.cfg)
+        if _SCIPY_QMC_AVAILABLE:
+            self._lhs_sampler = _qmc.LatinHypercube(d=self.cfg.latent_dim, seed=None)
+        else:
+            self._lhs_sampler = None
 
     @staticmethod
     def reparameterise(mu: torch.Tensor,
@@ -243,16 +254,12 @@ class ClothCVAE(nn.Module):
         with torch.no_grad():
             # Latin Hypercube Sampling for better coverage of the latent space.
             # Falls back to pure N(0,I) if scipy is unavailable.
-            try:
-                from scipy.stats import qmc
-                from scipy.stats import norm as scipy_norm
-                sampler     = qmc.LatinHypercube(d=self.cfg.latent_dim, seed=None)
-                lhs_samples = sampler.random(n=n)                    # [n, L] uniform [0,1]
-                z_np        = scipy_norm.ppf(
-                    np.clip(lhs_samples, 1e-6, 1 - 1e-6)
-                )                                                     # [n, L] ~ N(0,I)
-                z = torch.from_numpy(z_np.astype(np.float32)).to(device)
-            except Exception:
+            if self._lhs_sampler is not None:
+                import numpy as np
+                lhs_samples = self._lhs_sampler.random(n=n)
+                z_np = _scipy_norm.ppf(np.clip(lhs_samples, 1e-6, 1 - 1e-6)).astype(np.float32)
+                z = torch.from_numpy(z_np).to(device)
+            else:
                 z = torch.randn(n, self.cfg.latent_dim, device=device)
             cond = target_stress.expand(n, 1).to(device)
             return self.decoder(z, cond)  # [n, K]

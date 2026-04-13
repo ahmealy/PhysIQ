@@ -328,14 +328,17 @@ async def mesh_preview(domain: str = "cylinder_flow", trajectory: int = 0):
         pos = meta["pos"][start:end].tolist()          # [N, 2]
         node_type = meta["node_type"][start:end].flatten().astype(int).tolist()
 
-        # Filter cells to only those whose nodes all belong to this trajectory
-        # (CFD stores a single global cell array; node indices are global)
-        if "cells" in meta:
-            cells_raw = meta["cells"].astype(np.int32)   # [F, 3] global indices
+        # Slice cells for this trajectory using cindices (cell index array, parallel to indices).
+        # Cell node indices are already local (0-based within each trajectory).
+        if "cells" in meta and "cindices" in meta:
+            c_start = int(meta["cindices"][trajectory])
+            c_end   = int(meta["cindices"][trajectory + 1])
+            cells_local = meta["cells"][c_start:c_end].tolist()
+        elif "cells" in meta:
+            # Fallback: cells use global indices — filter and remap
+            cells_raw = meta["cells"].astype(np.int32)
             mask = (cells_raw >= start) & (cells_raw < end)
-            valid = mask.all(axis=1)
-            # Remap to local indices (0-based within this trajectory)
-            cells_local = (cells_raw[valid] - start).tolist()
+            cells_local = (cells_raw[mask.all(axis=1)] - start).tolist()
         else:
             cells_local = []
 

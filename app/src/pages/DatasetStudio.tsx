@@ -272,8 +272,8 @@ export const DatasetStudio: React.FC = () => {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={data.node_count_bins} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                    <XAxis dataKey="bin" stroke="#64748b" fontSize={10} tickFormatter={(v) => v.toLocaleString()} interval={4} />
-                    <YAxis stroke="#64748b" fontSize={10} />
+                    <XAxis dataKey="bin" stroke="#64748b" fontSize={10} tickFormatter={(v) => v.toLocaleString()} interval={4} label={{ value: 'Nodes per trajectory', position: 'insideBottom', offset: -2, fontSize: 9, fill: '#475569' }} />
+                    <YAxis stroke="#64748b" fontSize={10} label={{ value: 'Trajectories', angle: -90, position: 'insideLeft', offset: 10, fontSize: 9, fill: '#475569' }} />
                     <Tooltip
                       contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b' }}
                       labelFormatter={(v) => `${parseInt(v).toLocaleString()} nodes`}
@@ -351,6 +351,13 @@ export const DatasetStudio: React.FC = () => {
                     domain={domain}
                   />
                 </div>
+              )}
+              {preview && !previewLoading && (
+                <p className="text-[10px] text-slate-500 text-center">
+                  {domain === 'flag_simple'
+                    ? 'Color = Z height (world space at t=0) · X/Y axes = world X/Y'
+                    : 'Color = velocity magnitude at t=0'}
+                </p>
               )}
               {!preview && !previewLoading && (
                 <div className="h-48 flex items-center justify-center text-slate-600 text-sm">

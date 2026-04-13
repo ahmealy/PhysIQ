@@ -301,17 +301,19 @@ async def mesh_preview(domain: str = "cylinder_flow", trajectory: int = 0):
         if not os.path.exists(traj_path):
             raise HTTPException(404, "Trajectory not found: %s" % traj_path)
         traj = np.load(traj_path)
-        mesh_pos = traj["mesh_pos"].tolist()          # [N, 2]
-        faces = traj["cells"].astype(int).tolist()    # [F, 3]
-        world_pos_t0 = traj["world_pos"][0]            # [N, 3]
-        field_values = np.linalg.norm(world_pos_t0, axis=-1).tolist()  # [N]
+        faces = traj["cells"].astype(int).tolist()         # [F, 3]
+        world_pos_t0 = traj["world_pos"][0]                # [N, 3]  — actual cloth shape at t=0
+        # Use world_pos x,y as 2D display coordinates (real cloth shape, not flat UV grid)
+        positions_2d = world_pos_t0[:, :2].tolist()        # [N, 2]  x,y in world space
+        # Color by z (height) — shows the 3D drape in the 2D projection
+        field_values = world_pos_t0[:, 2].tolist()         # [N]     z coordinate
         node_type = traj["node_type"].flatten().astype(int).tolist()
         return {
-            "positions": mesh_pos,
+            "positions": positions_2d,
             "faces": faces,
             "field_values": field_values,
             "node_type": node_type,
-            "n_nodes": len(mesh_pos),
+            "n_nodes": len(positions_2d),
             "n_faces": len(faces),
         }
     else:

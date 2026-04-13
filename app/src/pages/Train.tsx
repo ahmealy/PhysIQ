@@ -28,7 +28,7 @@ export const Train: React.FC = () => {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logPath, setLogPath] = useState<string>('runs/train_ui.log');
   const [copied, setCopied] = useState(false);
-  const [arch, setArch] = useState('GNS');
+  const [arch, setArch] = useState('GN');
   const [tnsHeads, setTnsHeads] = useState(4);
   const [tnsDropout, setTnsDropout] = useState(0.0);
   const [sageAggr, setSageAggr] = useState<'mean' | 'max' | 'sum'>('mean');
@@ -220,6 +220,9 @@ export const Train: React.FC = () => {
               early_stopping_patience: data.active_config.early_stopping_patience ?? prev.early_stopping_patience,
               message_passing_steps: data.active_config.message_passing_num ?? prev.message_passing_steps,
             }));
+            if (data.active_config.architecture) {
+              setArch(data.active_config.architecture.toUpperCase());
+            }
           }
         } else {
           // Training is not running — make sure button shows correctly
@@ -417,8 +420,8 @@ export const Train: React.FC = () => {
               {(() => {
                 const ARCHS = [
                   {
-                    id: 'GNS',
-                    label: 'GNS',
+                    id: 'GN',
+                    label: 'GN',
                     sub: 'Graph Network Simulator',
                     tooltip: [
                       '• Sum-aggregation + MLP per message-passing step.',
@@ -437,7 +440,7 @@ export const Train: React.FC = () => {
                       '• Edge features enter the attention key → geometry-aware.',
                       '• Learned β-gate blends self-transform + attention.',
                       '✅ Best for: global physics coupling (pressure waves, acoustics).',
-                      '✅ Better long-range dependencies than GNS.',
+                      '✅ Better long-range dependencies than GN.',
                       '⚠ ~20% slower per epoch; heads must divide hidden size (128).',
                     ],
                   },

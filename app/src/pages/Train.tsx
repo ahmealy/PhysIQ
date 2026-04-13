@@ -782,8 +782,8 @@ export const Train: React.FC = () => {
                     </div>
                     {/* Device */}
                     <div className="w-24 shrink-0">
-                      <span className={`text-[9px] font-bold ${p.device === 'remote GPU' ? 'text-blue-400' : 'text-slate-500'}`}>
-                        {p.device === 'remote GPU' ? '🖥 Remote GPU' : '💻 Local CPU'}
+                      <span className={`text-[9px] font-bold ${p.device?.startsWith('remote') ? 'text-blue-400' : 'text-slate-500'}`}>
+                        {p.device?.startsWith('remote') ? '🖥 Remote GPU' : '💻 Local CPU'}
                       </span>
                     </div>
                     {/* Status */}

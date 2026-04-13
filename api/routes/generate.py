@@ -754,7 +754,9 @@ async def generate(req: GenerateRequest):
                         except Exception as exc:
                             import logging
                             logging.getLogger(__name__).warning(
-                                "GNN rollout failed for candidate %d: %s", idx, exc)
+                                "GNN rollout failed for candidate %d (%s) — "
+                                "model may be undertrained (NaN/divergence after few epochs): %s",
+                                idx, type(exc).__name__, exc)
                             gnn_val  = None
                             gap      = None
                             converged = None

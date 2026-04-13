@@ -149,7 +149,7 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
               {hasGnn ? (
                 <span className="text-violet-300 font-mono">{gnnLabel} ✓</span>
               ) : gnnFailed ? (
-                <span className="text-slate-500 italic">scoring failed</span>
+                <span className="text-amber-600 italic text-[10px]" title="Rollout diverged — model may need more training epochs">unstable rollout</span>
               ) : (
                 <span className="text-slate-500">—</span>
               )}

@@ -335,6 +335,42 @@ if __name__ == '__main__':
                 'message_passing_num':  cfg['message_passing_num'],
             }, checkpoint_path)
             print(f"  -> New best model saved at epoch {epoch} with valid loss {valid_loss:.2e}")
+
+            # Rebuild confidence index whenever a better checkpoint is saved.
+            # With subsampling this takes ~10s on GPU — always up-to-date if
+            # training crashes or is stopped after any epoch.
+            if cfg.get('build_confidence_index', True):
+                try:
+                    from confidence.index import NearestNeighborIndex
+                    from model.embedding import extract_embedding
+
+                    MAX_INDEX_SAMPLES = cfg.get('confidence_index_max_samples', 5000)
+                    n_total = len(train_dataset)
+                    if n_total > MAX_INDEX_SAMPLES:
+                        rng     = np.random.default_rng(seed=42)
+                        indices = sorted(rng.choice(n_total, size=MAX_INDEX_SAMPLES, replace=False).tolist())
+                    else:
+                        indices = list(range(n_total))
+
+                    embs = []
+                    simulator.eval()
+                    for i in indices:
+                        g = train_dataset[i]
+                        if transformer is not None:
+                            g = transformer(g)
+                        embs.append(extract_embedding(simulator, g, device=device))
+                    simulator.train()
+
+                    embs_arr   = np.stack(embs)
+                    idx_obj    = NearestNeighborIndex()
+                    idx_obj.build(embs_arr)
+                    index_slug = domain.replace("_", "")
+                    index_path = os.path.join(log_dir, f'embedding_index_{index_slug}.pkl')
+                    idx_obj.save(index_path)
+                    print("  -> Confidence index updated (%d samples, diameter: %.4f)" % (
+                        len(embs), idx_obj.train_diameter))
+                except Exception as _idx_e:
+                    print("  -> Warning: confidence index update failed (non-fatal): %s" % _idx_e)
         else:
             epochs_no_improve += 1
             print(f"  -> No improvement for {epochs_no_improve}/{early_stopping_patience} epochs")
@@ -343,33 +379,5 @@ if __name__ == '__main__':
                 break
 
     writer.close()
-
-    # ── Build confidence index (optional, default enabled) ────────────────────────
-    if cfg.get('build_confidence_index', True):
-        try:
-            print("\nBuilding confidence index on training set...")
-            from confidence.index import NearestNeighborIndex
-            from model.embedding import extract_embedding
-            from torch_geometric.loader import DataLoader as SingleLoader
-
-            embeddings = []
-            simulator.eval()
-            single_loader = SingleLoader(train_dataset, batch_size=1, shuffle=False, num_workers=0)
-            for graph in tqdm.tqdm(single_loader, desc='Extracting embeddings'):
-                if transformer is not None:
-                    graph = transformer(graph)
-                emb = extract_embedding(simulator, graph, device=device)
-                embeddings.append(emb)
-
-            embeddings_arr = np.stack(embeddings)   # [N_train, 128]
-            index = NearestNeighborIndex()
-            index.build(embeddings_arr)
-            index_slug = domain.replace("_", "")  # cylinderflow, flagsimple
-            index_path = os.path.join(log_dir, f'embedding_index_{index_slug}.pkl')
-            index.save(index_path)
-            print("Confidence index saved to %s (backend: %s, diameter: %.4f, N=%d)" % (
-                index_path, index.backend, index.train_diameter, len(embeddings)))
-        except Exception as e:
-            print("Warning: confidence index build failed (non-fatal): %s" % e)
 
     print(f"\nTraining finished. Best model at epoch {best_epoch} with validation loss {best_valid_loss:.2e}")

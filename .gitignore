@@ -14,6 +14,8 @@ log/
 *.tar.gz
 *.zip
 runs/
+!runs/embedding_index_cylinderflow.pkl
+!runs/embedding_index_flagsimple.pkl
 __pycache__/
 
 # Virtual environments

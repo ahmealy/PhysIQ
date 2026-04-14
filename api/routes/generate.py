@@ -34,7 +34,7 @@ import io
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import numpy as np
 from fastapi import APIRouter, HTTPException
@@ -161,6 +161,17 @@ class CFDDesignSampler(BaseDesignSampler):
             logging.getLogger(__name__).warning(
                 "Training dataset unavailable for mesh lookup: %s", e
             )
+        # Param-space OOD confidence (no mesh or GNN needed)
+        try:
+            from extensions.confidence.ood_detector import ParamSpaceOOD as _ParamSpaceOOD
+            self._param_ood: Optional[_ParamSpaceOOD] = _ParamSpaceOOD(dataset_path='data')
+            if not self._param_ood.available:
+                logging.getLogger(__name__).warning(
+                    "ParamSpaceOOD: design_params.npy not found — confidence will be N/A"
+                )
+        except Exception as _e:
+            logging.getLogger(__name__).warning("ParamSpaceOOD unavailable: %s", _e)
+            self._param_ood = None
 
     def sample(self, target: float, n: int, device: str,
                method: str = "sample") -> tuple[list, list]:
@@ -170,8 +181,6 @@ class CFDDesignSampler(BaseDesignSampler):
         import torch
         from extensions.generative.cvae_cfd import CVAETrainer
         from extensions.generative.drag_surrogate import DragSurrogateTrainer
-        from extensions.generative.mesh_generator import CFDMeshBuilder
-        from extensions.confidence.ood_detector import OODDetector
         from api.state import get_model, DOMAINS
 
         if not os.path.exists(self.CFD_CVAE_PATH):
@@ -196,31 +205,7 @@ class CFDDesignSampler(BaseDesignSampler):
         else:
             params_phys = trainer.generate(target_drag_physical=target, n=n)
 
-        # ── OOD detector (optional) ──────────────────────────────────────────
-        cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
-        detector = None
-        # Try domain-scoped index first (written by current train.py),
-        # fall back to legacy non-scoped name for backward compatibility.
-        _ood_index_path = (
-            "runs/embedding_index_cylinderflow.pkl"
-            if os.path.exists("runs/embedding_index_cylinderflow.pkl")
-            else "runs/embedding_index.pkl"
-        )
-        try:
-            sim = get_model(cfd_ckpt, device=device) if os.path.exists(cfd_ckpt) else None
-            if sim is not None and os.path.exists(_ood_index_path):
-                detector = OODDetector.from_index_file(
-                    _ood_index_path, simulator=sim, device=device
-                )
-        except Exception as _ood_exc:
-            import logging as _log
-            _log.getLogger(__name__).warning(
-                "OOD detector failed to initialise (confidence will show N/A): %s",
-                _ood_exc, exc_info=True
-            )
-
         # ── Build meshes ─────────────────────────────────────────────────────
-        builder    = CFDMeshBuilder()
         candidates = []
 
         for i, row in enumerate(params_phys):
@@ -230,19 +215,32 @@ class CFDDesignSampler(BaseDesignSampler):
             cy   = float(np.clip(cy,   r + 0.01, 0.41 - r - 0.01))
             v_in = float(np.clip(v_in, 0.05, 2.0))
 
-            try:
-                graph = builder.build(cx, cy, r, v_in)
-            except Exception:
-                continue
+            # Load real mesh for thumbnail (no gradient needed here)
+            graph = None
+            if (self._mesh_lookup is not None and self._mesh_lookup.available
+                    and self._dataset is not None):
+                try:
+                    _traj_idx = self._mesh_lookup.find_nearest(cx, cy, r)
+                    import torch as _torch
+                    _dummy_vin = _torch.tensor([v_in], dtype=_torch.float32)
+                    graph = self._mesh_lookup.load_mesh_for_trajectory(
+                        _traj_idx, _dummy_vin, self._dataset, device='cpu'
+                    )
+                except Exception as _mesh_err:
+                    import logging as _mlog
+                    _mlog.getLogger(__name__).debug(
+                        "Real mesh load failed for thumbnail: %s", _mesh_err
+                    )
+                    # graph stays None — thumbnail will be skipped
 
             pred_drag = float(surrogate_trainer.predict(
                 np.array([[cx, cy, r, v_in]], dtype=np.float32))[0])
 
             ood_conf, is_ood = -1.0, False
-            if detector is not None:
+            if self._param_ood is not None:
                 try:
-                    res = detector.score(graph)
-                    ood_conf, is_ood = res.confidence, res.is_ood
+                    _ood_res = self._param_ood.score(cx, cy, r, v_in)
+                    ood_conf, is_ood = _ood_res.confidence, _ood_res.is_ood
                 except Exception:
                     pass
 
@@ -250,7 +248,7 @@ class CFDDesignSampler(BaseDesignSampler):
                 id=i, domain="cylinder_flow",
                 predicted_value=pred_drag, target_value=target,
                 ood_confidence=ood_conf, is_ood=is_ood,
-                mesh_nodes=graph.num_nodes,
+                mesh_nodes=graph.num_nodes if graph is not None else 0,
                 params={"cx": cx, "cy": cy, "r": r, "v_inlet": v_in},
             ), graph))
 
@@ -803,6 +801,9 @@ async def generate(req: GenerateRequest):
             for c, graph in results:
                 try:
                     if req.domain == "cylinder_flow":
+                        if graph is None:
+                            thumbnail_urls[c.id] = None
+                            continue
                         p = c.params
                         png = ThumbnailRenderer.render_cfd(
                             graph,

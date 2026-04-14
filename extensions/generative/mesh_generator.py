@@ -113,6 +113,13 @@ class CFDMeshBuilder(BaseMeshBuilder):
     """
     Builds a cylinder_flow CFD mesh from (cx, cy, r, v_inlet).
 
+    .. deprecated:: sample path, 2026-04-13
+        No longer used in CFDDesignSampler.sample().
+        Thumbnails and OOD scoring now use RealMeshLookup + ParamSpaceOOD
+        respectively.
+        Retained for: MeshGeneratorFactory registry, params_to_graph() helper,
+        and CLI.
+
     Algorithm
     ---------
     1. Generate ``n_cyl`` points on the cylinder circle (WALL_BOUNDARY).

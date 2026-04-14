@@ -5,6 +5,7 @@
 import asyncio
 import datetime
 import json
+import logging
 import os
 import pickle
 import shlex
@@ -28,6 +29,8 @@ from dataset import FpcDataset
 from utils.utils import NodeType
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 # ── In-progress rollout state (for frontend reconnect on page refresh) ────────
 _rollout_state: dict = {
@@ -195,6 +198,19 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     _domain_slug = req.domain.replace("_", "")  # cylinderflow, flagsimple
     index_path = os.path.join("runs", f"embedding_index_{_domain_slug}.pkl")
     if os.path.exists(index_path):
+        # Warn if index predates the checkpoint — scores may be stale
+        try:
+            _ckpt = cfg.get("checkpoint", "")
+            if _ckpt and os.path.exists(_ckpt):
+                if os.path.getmtime(_ckpt) > os.path.getmtime(index_path) + 60:
+                    logger.warning(
+                        "Confidence index '%s' predates checkpoint '%s' — "
+                        "scores may be inaccurate. Rebuild: "
+                        "python -m confidence.build_index --checkpoint %s --output %s",
+                        index_path, _ckpt, _ckpt, index_path,
+                    )
+        except Exception:
+            pass  # never block rollout
         try:
             from confidence.index import NearestNeighborIndex
             from model.embedding import extract_embedding
@@ -306,6 +322,19 @@ def _run_cloth_rollout_sync(req, cfg: dict, device: str, progress_callback) -> d
     confidence_score = None
     index_path = os.path.join("runs", "embedding_index_flagsimple.pkl")
     if os.path.exists(index_path):
+        # Warn if index predates the checkpoint — scores may be stale
+        try:
+            _ckpt = cfg.get("checkpoint", "")
+            if _ckpt and os.path.exists(_ckpt):
+                if os.path.getmtime(_ckpt) > os.path.getmtime(index_path) + 60:
+                    logger.warning(
+                        "Confidence index '%s' predates checkpoint '%s' — "
+                        "scores may be inaccurate. Rebuild: "
+                        "python -m confidence.build_index --checkpoint %s --output %s",
+                        index_path, _ckpt, _ckpt, index_path,
+                    )
+        except Exception:
+            pass  # never block rollout
         try:
             from confidence.index import NearestNeighborIndex
             from model.embedding import extract_embedding

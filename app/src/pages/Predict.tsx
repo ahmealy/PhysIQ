@@ -99,7 +99,17 @@ export const Predict: React.FC = () => {
       .catch(() => { setCheckpoint(null); setCheckpointLoading(false); });
     fetch(`/api/checkpoints?domain=${domain}`)
       .then(r => r.ok ? r.json() : null)
-      .then(d => { setCheckpointList(d?.checkpoints ?? []); })
+      .then(d => {
+        // Filter to this domain's physics checkpoints only (exclude CVAE/surrogate/util)
+        const allCkpts: any[] = d?.checkpoints ?? [];
+        const phys = allCkpts.filter(c =>
+          c.domain === domain &&
+          !c.path.includes('cvae') &&
+          !c.path.includes('surrogate') &&
+          c.valid_loss !== null  // must have been trained as a physics model
+        );
+        setCheckpointList(phys);
+      })
       .catch(() => { setCheckpointList([]); });
     // Also reload dataset info for the selected domain
     fetch(`/api/dataset/info?domain=${domain}`)
@@ -343,10 +353,10 @@ export const Predict: React.FC = () => {
                 </div>
               )}
 
-              {/* Model / checkpoint selector — shown when multiple checkpoints exist */}
-              {checkpointList.length > 1 && (
+              {/* Model / checkpoint selector — shown when checkpoints are available */}
+              {checkpointList.length >= 1 && (
                 <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Compare Model</label>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Model Checkpoint</label>
                   <select
                     value={selectedCheckpoint}
                     onChange={e => setSelectedCheckpoint(e.target.value)}
@@ -361,7 +371,9 @@ export const Predict: React.FC = () => {
                     ))}
                   </select>
                   <p className="text-[10px] text-slate-500">
-                    Select a specific checkpoint to compare GN / TNS / SAGE on the same trajectory.
+                    {checkpointList.length > 1
+                      ? 'Choose a specific checkpoint to compare GN / TNS / SAGE on the same trajectory.'
+                      : 'Train multiple architectures (GN, TNS, SAGE) to enable model comparison.'}
                   </p>
                 </div>
               )}
@@ -406,8 +418,12 @@ export const Predict: React.FC = () => {
                   onChange={(e) => setDevice(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
                 >
-                  {status?.gpu_available && (
-                    <option value="cuda:0">cuda:0{gpuLabel ? ` (${gpuLabel})` : ''}</option>
+                  {(status?.gpu_available || remoteConfig) && (
+                    <option value="cuda:0">
+                      {remoteConfig
+                        ? `cuda:0 (remote: ${remoteConfig.host})`
+                        : `cuda:0${gpuLabel ? ` (${gpuLabel})` : ''}`}
+                    </option>
                   )}
                   <option value="cpu">cpu</option>
                 </select>

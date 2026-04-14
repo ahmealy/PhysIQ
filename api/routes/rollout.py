@@ -393,14 +393,17 @@ async def list_checkpoints(domain: str = "cylinder_flow"):
             epoch = int(ckpt.get("epoch", 0))
             vloss = float(ckpt.get("valid_loss", float("nan")))
             ckpt_domain = ckpt.get("domain", "cylinder_flow")
+            import math
+            vloss_safe = round(vloss, 6) if math.isfinite(vloss) else None
+            loss_str   = f"{vloss:.4f}" if math.isfinite(vloss) else "n/a"
             result.append({
                 "path":         path,
                 "domain":       ckpt_domain,
                 "architecture": arch,
                 "epoch":        epoch,
-                "valid_loss":   round(vloss, 6),
+                "valid_loss":   vloss_safe,
                 "is_default":   path == default,
-                "label":        f"{arch.upper()} · ep{epoch} · loss={vloss:.4f}",
+                "label":        f"{arch.upper()} · ep{epoch} · loss={loss_str}",
             })
         except Exception:
             result.append({"path": path, "domain": domain, "architecture": "?",

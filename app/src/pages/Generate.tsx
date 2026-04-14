@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Sparkles, Square, AlertCircle, Info } from 'lucide-react';
+import { Sparkles, Square, AlertCircle, Info, Server } from 'lucide-react';
 import { CandidateCard } from '../components/CandidateCard';
 import { OptimizationChart } from '../components/OptimizationChart';
 import { PipelineSteps } from '../components/PipelineSteps';
@@ -83,6 +83,7 @@ export const Generate: React.FC = () => {
     })
   );
   const [gpuAvailable, setGpuAvailable] = useState(false);
+  const [remoteGpuHost, setRemoteGpuHost] = useState<string | null>(null);  // set when SSH remote is configured
   const [isGenerating, setIsGenerating] = useState(false);
   const [candidates, setCandidates]     = useState<Candidate[]>(() =>
     loadLS<Candidate[]>(LS_CANDIDATES, [])
@@ -114,6 +115,7 @@ export const Generate: React.FC = () => {
     fetch('/api/train/remote').then(r => r.ok ? r.json() : null).then(d => {
       if (d && d.enabled && d.host) {
         setGpuAvailable(true);
+        setRemoteGpuHost(d.host);
         setConfig(c => c.device === 'cpu' ? { ...c, device: 'cuda:0' } : c);
       }
     }).catch(() => {});
@@ -324,12 +326,23 @@ export const Generate: React.FC = () => {
               onChange={e => setConfig(c => ({ ...c, device: e.target.value }))}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
             >
-              <option value="cpu">CPU</option>
+              <option value="cpu">CPU (local)</option>
               {gpuAvailable && <option value="cuda:0">GPU (cuda:0)</option>}
             </select>
           </div>
 
         </div>
+
+        {/* Remote GPU note — Generate runs locally, unlike Predict which SSHes */}
+        {remoteGpuHost && (
+          <div className="flex items-center gap-2 p-3 bg-amber-600/10 border border-amber-500/20 rounded-lg text-xs">
+            <Server className="w-4 h-4 text-amber-400 shrink-0" />
+            <div>
+              <span className="text-amber-300 font-bold">Remote GPU detected ({remoteGpuHost})</span>
+              <span className="text-amber-400/70 ml-2">— Generate runs locally (no SSH dispatch yet). Select CPU unless your local machine has CUDA.</span>
+            </div>
+          </div>
+        )}
 
         {/* Domain description */}
         <div className="flex items-start gap-2 text-xs text-slate-400 bg-slate-800/40 rounded-lg px-4 py-3">

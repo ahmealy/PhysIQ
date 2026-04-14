@@ -10,6 +10,8 @@ export const Predict: React.FC = () => {
   const [domain, setDomain] = useState(() => searchParams.get('domain') || 'cylinder_flow');
   const [checkpoint, setCheckpoint] = useState<any>(null);
   const [checkpointLoading, setCheckpointLoading] = useState(false);
+  const [checkpointList, setCheckpointList] = useState<any[]>([]);
+  const [selectedCheckpoint, setSelectedCheckpoint] = useState<string>('');  // '' = use domain default
   const [trajectoryIndex, setTrajectoryIndex] = useState(() => parseInt(searchParams.get('traj') || '0', 10));
   const [device, setDevice] = useState('cpu');
   const [isRunning, setIsRunning] = useState(false);
@@ -86,14 +88,19 @@ export const Predict: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  // Load checkpoint info when domain changes
+  // Load checkpoint info + list when domain changes
   useEffect(() => {
     setCheckpointLoading(true);
     setCheckpoint(null);
+    setSelectedCheckpoint('');
     fetch(`/api/checkpoint?domain=${domain}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { setCheckpoint(d); setCheckpointLoading(false); })
       .catch(() => { setCheckpoint(null); setCheckpointLoading(false); });
+    fetch(`/api/checkpoints?domain=${domain}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { setCheckpointList(d?.checkpoints ?? []); })
+      .catch(() => { setCheckpointList([]); });
     // Also reload dataset info for the selected domain
     fetch(`/api/dataset/info?domain=${domain}`)
       .then(r => r.ok ? r.json() : null)
@@ -188,6 +195,7 @@ export const Predict: React.FC = () => {
           domain: domain,
           trajectory_index: trajectoryIndex,
           device: device,
+          ...(selectedCheckpoint ? { checkpoint: selectedCheckpoint } : {}),
         }),
       });
 
@@ -332,6 +340,29 @@ export const Predict: React.FC = () => {
                 <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-xs">
                   <Database className="w-4 h-4 shrink-0 text-yellow-600" />
                   <span className="text-yellow-600">No trained model found — train first</span>
+                </div>
+              )}
+
+              {/* Model / checkpoint selector — shown when multiple checkpoints exist */}
+              {checkpointList.length > 1 && (
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Compare Model</label>
+                  <select
+                    value={selectedCheckpoint}
+                    onChange={e => setSelectedCheckpoint(e.target.value)}
+                    disabled={isRunning}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
+                  >
+                    <option value="">— Domain default —</option>
+                    {checkpointList.map(c => (
+                      <option key={c.path} value={c.path}>
+                        {c.label}{c.is_default ? ' ★' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-500">
+                    Select a specific checkpoint to compare GN / TNS / SAGE on the same trajectory.
+                  </p>
                 </div>
               )}
 

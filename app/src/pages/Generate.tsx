@@ -102,14 +102,21 @@ export const Generate: React.FC = () => {
 
   const domCfg = DOMAIN_CONFIGS[config.domain as keyof typeof DOMAIN_CONFIGS];
 
-  // ── GPU auto-detection (mirrors Predict.tsx) ───────────────────────────────
+  // ── GPU auto-detection (mirrors Predict.tsx — checks local GPU + remote SSH) ─
   useEffect(() => {
     fetch('/api/status').then(r => r.json()).then(s => {
-      setGpuAvailable(!!s.gpu_available);
       if (s.gpu_available) {
+        setGpuAvailable(true);
         setConfig(c => c.device === 'cpu' ? { ...c, device: 'cuda:0' } : c);
       }
-    }).catch(() => { /* status unavailable — keep cpu */ });
+    }).catch(() => {});
+    // Remote GPU overrides local GPU check (same as Predict.tsx)
+    fetch('/api/train/remote').then(r => r.ok ? r.json() : null).then(d => {
+      if (d && d.enabled && d.host) {
+        setGpuAvailable(true);
+        setConfig(c => c.device === 'cpu' ? { ...c, device: 'cuda:0' } : c);
+      }
+    }).catch(() => {});
   }, []);
 
   // ── Analyze handler — run rollout then open Visualize ─────────────────────

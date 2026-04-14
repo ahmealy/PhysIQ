@@ -71,6 +71,7 @@ class RolloutRequest(BaseModel):
     trajectory_index:  int = 0
     split:             str = "test"
     device:            str = "cuda:0"
+    checkpoint:        str = ""   # optional override; empty string → use DOMAINS default
 
 
 def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
@@ -378,6 +379,36 @@ async def get_rollout_status():
     return _rollout_state.copy()
 
 
+@router.get("/checkpoints")
+async def list_checkpoints(domain: str = "cylinder_flow"):
+    """List all .pth checkpoint files, annotated with metadata from the checkpoint."""
+    import glob
+    default = DOMAINS.get(domain, {}).get("checkpoint", "")
+    files = sorted(glob.glob("checkpoints/*.pth"))
+    result = []
+    for path in files:
+        try:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            arch = ckpt.get("architecture", "gn")
+            epoch = int(ckpt.get("epoch", 0))
+            vloss = float(ckpt.get("valid_loss", float("nan")))
+            ckpt_domain = ckpt.get("domain", "cylinder_flow")
+            result.append({
+                "path":         path,
+                "domain":       ckpt_domain,
+                "architecture": arch,
+                "epoch":        epoch,
+                "valid_loss":   round(vloss, 6),
+                "is_default":   path == default,
+                "label":        f"{arch.upper()} · ep{epoch} · loss={vloss:.4f}",
+            })
+        except Exception:
+            result.append({"path": path, "domain": domain, "architecture": "?",
+                           "epoch": 0, "valid_loss": None, "is_default": path == default,
+                           "label": path})
+    return {"checkpoints": result}
+
+
 @router.post("/rollout")
 async def run_rollout(req: RolloutRequest):
     """
@@ -396,8 +427,12 @@ async def run_rollout(req: RolloutRequest):
     if not cfg["available"]:
         raise HTTPException(400, "Domain '%s' not available" % req.domain)
 
-    if not os.path.exists(cfg["checkpoint"]):
-        raise HTTPException(404, "No checkpoint at %s. Train first." % cfg["checkpoint"])
+    # Resolve checkpoint: explicit override takes priority over domain default
+    checkpoint_path = req.checkpoint if req.checkpoint else cfg["checkpoint"]
+    if not os.path.exists(checkpoint_path):
+        raise HTTPException(404, "No checkpoint at %s. Train first." % checkpoint_path)
+    # Inject into cfg so downstream helpers (_run_rollout_sync) see the right path
+    cfg = {**cfg, "checkpoint": checkpoint_path}
 
     # Track rollout state for frontend reconnect
     _rollout_state.update({

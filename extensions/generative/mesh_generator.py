@@ -62,6 +62,28 @@ if _PROJECT_ROOT not in sys.path:
 
 from utils.utils import NodeType   # noqa: E402
 
+_INFLOW_TYPE  = int(NodeType.INFLOW)   # 4
+_OUTFLOW_TYPE = int(NodeType.OUTFLOW)  # 5
+
+
+# ---------------------------------------------------------------------------
+# Differentiable injection helper
+# ---------------------------------------------------------------------------
+
+def _inject_scalar_differentiable(
+    feat_col: torch.Tensor,  # [N] current feature column
+    node_mask: torch.Tensor, # [N] bool mask of nodes to overwrite
+    new_val: torch.Tensor,   # [1] or [] differentiable scalar to inject
+) -> torch.Tensor:
+    """Replace feat_col values at masked nodes with new_val, preserving autograd."""
+    delta = torch.zeros_like(feat_col)
+    idx   = node_mask.nonzero(as_tuple=True)[0]
+    delta = delta.index_put(
+        (idx,),
+        new_val.expand(idx.shape[0]) - feat_col[idx].detach(),
+    )
+    return feat_col.detach() + delta
+
 
 # ---------------------------------------------------------------------------
 # Abstract base
@@ -330,6 +352,7 @@ class RealMeshLookup:
         self._norm_params: Optional[np.ndarray] = None
         self._p_min: Optional[np.ndarray] = None
         self._p_max: Optional[np.ndarray] = None
+        self._scale: Optional[np.ndarray] = None
 
         dp_path = os.path.join(dataset_path, 'design_params.npy')
         if not os.path.exists(dp_path):
@@ -349,6 +372,7 @@ class RealMeshLookup:
             self._params      = geom
             self._p_min       = p_min
             self._p_max       = p_max
+            self._scale       = scale  # stored for use in find_nearest
             self._norm_params = (geom - p_min) / scale    # [N, 3] ∈ [0,1]
         except Exception:
             pass   # silent — _params stays None, find_nearest returns 0
@@ -374,9 +398,8 @@ class RealMeshLookup:
         if self._norm_params is None or self._p_min is None:
             return 0
 
-        query = np.array([cx, cy, r], dtype=np.float64)
-        scale = self._p_max - self._p_min
-        scale[scale < 1e-12] = 1.0
+        query  = np.array([cx, cy, r], dtype=np.float64)
+        scale  = self._scale
         q_norm = (query - self._p_min) / scale           # [3]
         diffs  = self._norm_params - q_norm               # [N, 3]
         dists  = (diffs ** 2).sum(axis=1)                 # [N]
@@ -411,8 +434,6 @@ class RealMeshLookup:
         """
         import torch_geometric.transforms as _T
 
-        _INFLOW_TYPE: int = 4   # NodeType.INFLOW
-
         transformer = _T.Compose([
             _T.FaceToEdge(),
             _T.Cartesian(norm=False),
@@ -446,19 +467,8 @@ class RealMeshLookup:
         # but staying differentiable w.r.t. v_inlet:
         inflow_idx = inflow_mask.nonzero(as_tuple=True)[0]   # indices
         if inflow_idx.numel() > 0:
-            # Build replacement column: broadcast v_inlet to all INFLOW nodes
-            vx_new = vx_col.detach().clone()          # [N] — starts as copy
-            # Differentiable splice: create a new tensor by index assignment
-            # Using index_put_ on a clone preserves the computation graph
-            # relative to v_inlet.
-            # Strategy: build vx column as detached base + differentiable delta
-            delta = torch.zeros_like(vx_col)          # [N] zeros, no grad
-            v_expanded = v_inlet_dev.expand(inflow_idx.shape[0])  # [n_inflow]
-            delta = delta.index_put(
-                (inflow_idx,),
-                v_expanded - vx_col[inflow_idx].detach(),
-            )
-            vx_new = vx_col.detach() + delta          # carries grad_fn
+            # Differentiable splice via module-level helper
+            vx_new = _inject_scalar_differentiable(vx_col, inflow_mask, v_inlet_dev)
 
             # Reconstruct x with differentiable vx column
             graph.x = torch.cat([

@@ -288,6 +288,8 @@ class CFDDesignSampler(BaseDesignSampler):
         import logging
         import torch
         import torch.nn.functional as F
+        from utils.utils import NodeType as _NodeType
+        from extensions.generative.mesh_generator import _inject_scalar_differentiable
 
         _logger = logging.getLogger(__name__)
 
@@ -324,8 +326,8 @@ class CFDDesignSampler(BaseDesignSampler):
         y_min = float(sc_surr.y_min)
         y_max = float(sc_surr.y_max)
 
-        # NodeType.OUTFLOW == 5  (hardcoded to avoid import in hot path)
-        _OUTFLOW_TYPE = 5
+        # NodeType constants (avoids magic numbers in hot path)
+        _OUTFLOW_TYPE = int(_NodeType.OUTFLOW)  # 5
 
         # Number of GNN rollout steps; only the last step is differentiable.
         # Keep K small (10) for speed — enough to propagate velocity downstream.
@@ -358,7 +360,7 @@ class CFDDesignSampler(BaseDesignSampler):
                 (node_type_col == _OUTFLOW_TYPE)            # OUTFLOW
             )
             outflow_mask  = (node_type_col == _OUTFLOW_TYPE)
-            inflow_mask   = (node_type_col == 4)            # NodeType.INFLOW
+            inflow_mask   = (node_type_col == int(_NodeType.INFLOW))  # 4
 
             # Detached warm-up steps — advance the velocity field K-1 steps
             # without tracking gradients (saves memory and compute).
@@ -377,17 +379,10 @@ class CFDDesignSampler(BaseDesignSampler):
             # Re-inject v_inlet into INFLOW nodes BEFORE the differentiable
             # final step.  This is the critical link: v_inlet → INFLOW velocity
             # → GNN message passing → OUTFLOW velocity → drag proxy → loss.
-            # We splice differentiably using index_put on a detached base.
-            inflow_idx = inflow_mask.nonzero(as_tuple=True)[0]
-            vx_warm    = current_x[:, 1].clone()           # [N] detached warm-up vx
-            if inflow_idx.numel() > 0:
-                v_expanded = v_in_t.expand(inflow_idx.shape[0])   # [n_inflow]
-                delta_vx   = torch.zeros_like(vx_warm)
-                delta_vx   = delta_vx.index_put(
-                    (inflow_idx,),
-                    v_expanded - vx_warm[inflow_idx].detach(),
-                )
-                vx_col = vx_warm.detach() + delta_vx      # carries grad_fn
+            # We splice differentiably via the shared helper.
+            vx_warm = current_x[:, 1].clone()           # [N] detached warm-up vx
+            if inflow_mask.any():
+                vx_col = _inject_scalar_differentiable(vx_warm, inflow_mask, v_in_t)
             else:
                 vx_col = vx_warm
 
@@ -432,10 +427,11 @@ class CFDDesignSampler(BaseDesignSampler):
                 try:
                     drag_phys = _gnn_drag(params_p)
                     return drag_phys, params_p
-                except Exception as _gnn_err:
+                except (RuntimeError, ValueError, IndexError) as _gnn_err:
                     _logger.warning(
                         "GNN drag step failed (%s); falling back to surrogate.",
                         _gnn_err,
+                        exc_info=True,
                     )
                     # fall through to surrogate
 

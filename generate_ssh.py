@@ -1,0 +1,144 @@
+import sys; sys.stdout.reconfigure(line_buffering=True)  # MUST be line 1 — before all other imports
+"""
+generate_ssh.py — SSH-compatible generate runner.
+
+Reads a JSON config file (runs/ui_generate_config.json produced by the FastAPI
+server), runs CVAE sampling / gradient-descent generation, and prints named
+SSE-format lines to stdout so the API can relay them to the browser.
+
+Usage:
+    python -u generate_ssh.py --config /abs/path/to/runs/ui_generate_config.json
+
+stdout lines (named SSE):
+    event: trajectory
+    data: {"values": [...]}
+
+    event: candidate
+    data: {<CandidateResult fields>, "thumbnail_b64": "<base64 png or null>", "session_id": null}
+
+    event: done
+    data: {"best_id": <int>, "session_id": null}
+
+    event: error
+    data: {"detail": "...traceback..."}
+
+The -u flag is required to disable output buffering; sys.stdout.reconfigure
+on line 1 provides a second layer of defence when -u is omitted.
+"""
+
+import argparse
+import base64
+import dataclasses
+import json
+import os
+import traceback
+
+# ── Project root ──────────────────────────────────────────────────────────────
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# chdir BEFORE sys.path so every relative path used by samplers (checkpoints/,
+# data/, result/) resolves from the project root, regardless of where the SSH
+# session started.
+os.chdir(_ROOT)
+sys.path.insert(0, _ROOT)
+
+
+# ── Named-SSE emitter ─────────────────────────────────────────────────────────
+
+def _sse(event: str, data: dict) -> None:
+    """Emit a named SSE event to stdout.
+
+    The blank line after ``data:`` is the SSE event terminator — without it
+    the browser's EventSource never fires the event handler.
+    """
+    print(f"event: {event}\ndata: {json.dumps(data)}\n", flush=True)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SSH-compatible generate runner")
+    parser.add_argument("--config", required=True,
+                        help="Path to ui_generate_config.json")
+    args = parser.parse_args()
+
+    try:
+        with open(args.config) as f:
+            cfg = json.load(f)
+    except Exception as e:
+        _sse("error", {"detail": "Cannot read config: %s" % e})
+        sys.exit(1)
+
+    try:
+        _run(cfg)
+    except Exception as e:
+        _sse("error", {"detail": str(e) + "\n" + traceback.format_exc()})
+        sys.exit(1)
+
+
+def _run(cfg: dict) -> None:
+    domain        = cfg["domain"]
+    target_value  = float(cfg["target_value"])
+    n_candidates  = int(cfg["n_candidates"])
+    method        = cfg.get("method", "sample")
+    device        = cfg.get("device", "cuda:0")
+
+    # Import samplers and renderer from the API module (project is on sys.path).
+    from api.routes.generate import _DOMAIN_SAMPLERS, ThumbnailRenderer
+
+    if domain not in _DOMAIN_SAMPLERS:
+        raise ValueError(
+            "Unknown domain '%s'. Available: %s" % (domain, list(_DOMAIN_SAMPLERS))
+        )
+
+    sampler = _DOMAIN_SAMPLERS[domain]()
+
+    # Run sampling (CVAE + surrogate / gradient descent).
+    results, trajectory = sampler.sample(target_value, n_candidates, device, method)
+    # results: list[tuple[CandidateResult, graph_or_None]]
+
+    # Stream optimisation trajectory first (gradient mode only).
+    if trajectory:
+        _sse("trajectory", {"values": list(trajectory)})
+
+    # Stream candidates with rendered thumbnails.
+    best_id  = 0
+    best_err = float("inf")
+
+    for c, graph in results:
+        # Render thumbnail ────────────────────────────────────────────────────
+        thumb_b64 = None
+        if graph is not None:
+            try:
+                if domain == "cylinder_flow":
+                    p   = c.params
+                    png = ThumbnailRenderer.render_cfd(
+                        graph,
+                        cx=p.get("cx"),
+                        cy=p.get("cy"),
+                        r=p.get("r"),
+                    )
+                else:
+                    png = ThumbnailRenderer.render_cloth(graph)
+                thumb_b64 = base64.b64encode(png).decode("ascii")
+            except Exception:
+                pass  # thumbnail is best-effort; never block the candidate stream
+
+        # Emit candidate event ────────────────────────────────────────────────
+        payload               = dataclasses.asdict(c)
+        payload["thumbnail_b64"] = thumb_b64
+        payload["session_id"]    = None   # filled in by the API relay layer
+        _sse("candidate", payload)
+
+        # Track best candidate (closest predicted_value to target_value).
+        err = abs(c.predicted_value - target_value)
+        if err < best_err:
+            best_err = err
+            best_id  = c.id
+
+    # Final done event ────────────────────────────────────────────────────────
+    _sse("done", {"best_id": best_id, "session_id": None})
+
+
+if __name__ == "__main__":
+    main()

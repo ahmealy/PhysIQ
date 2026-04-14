@@ -97,7 +97,6 @@ export const Predict: React.FC = () => {
     setArchSummary(null);
     setCheckpointLoading(true);
     setCheckpoint(null);
-    setSelectedCheckpoint('');
     fetch(`/api/checkpoint?domain=${domain}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { setCheckpoint(d); setCheckpointLoading(false); })

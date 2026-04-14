@@ -844,6 +844,114 @@ async def generate(req: GenerateRequest):
         except Exception as e:
             yield _sse_event("error", {"detail": str(e)})
 
+    async def event_stream_ssh() -> AsyncGenerator[str, None]:
+        """Relay named-SSE events from generate_ssh.py running on the remote GPU via SSH."""
+        import base64
+        import shlex
+        import subprocess
+
+        from api.routes.train import _build_ssh_prefix
+
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        os.makedirs(os.path.join(project_root, "runs"), exist_ok=True)
+        cfg_path = os.path.join(project_root, "runs", "ui_generate_config.json")
+
+        with open(cfg_path, "w") as _f:
+            json.dump({
+                "domain":       req.domain,
+                "target_value": req.target_value,
+                "n_candidates": req.n_candidates,
+                "method":       req.method,
+                "device":       "cuda:0",   # always GPU on remote
+            }, _f)
+
+        remote_cfg  = _load_remote_cfg()
+        venv_py     = remote_cfg.get(
+            "venv_python",
+            "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python",
+        ).strip()
+        ssh_prefix  = _build_ssh_prefix(remote_cfg)
+        script_path = os.path.join(project_root, "generate_ssh.py")
+        remote_cmd  = "cd %s && %s -u %s --config %s" % (
+            shlex.quote(project_root),
+            shlex.quote(venv_py),
+            shlex.quote(script_path),
+            shlex.quote(cfg_path),
+        )
+        cmd = ssh_prefix + [remote_cmd]
+
+        loop = asyncio.get_running_loop()
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            ),
+        )
+
+        current_event: str | None = None
+        try:
+            while True:
+                line = await loop.run_in_executor(None, proc.stdout.readline)
+                if not line:
+                    break
+                line = line.rstrip("\n")
+
+                if line.startswith("event: "):
+                    current_event = line[7:]    # extract event name
+                    yield line + "\n"
+                elif line.startswith("data: "):
+                    # Candidate events: decode thumbnail_b64 → _thumbnail_cache
+                    if current_event == "candidate":
+                        try:
+                            payload = json.loads(line[6:])
+                            b64 = payload.pop("thumbnail_b64", None)
+                            if b64:
+                                png     = base64.b64decode(b64)
+                                cand_id = payload.get("id", 0)
+                                sid     = session_id   # captured from outer generate() scope
+                                if sid not in _thumbnail_cache:
+                                    _thumbnail_cache[sid] = {}
+                                _thumbnail_cache[sid][cand_id] = png
+                                payload["thumbnail_url"] = (
+                                    f"/api/generate/thumbnail/{sid}/{cand_id}"
+                                )
+                            else:
+                                payload["thumbnail_url"] = None
+                            payload["session_id"] = session_id
+                            line = "data: " + json.dumps(payload)
+                        except Exception:
+                            pass   # forward original line if decode fails
+                    elif current_event == "done":
+                        try:
+                            payload = json.loads(line[6:])
+                            payload["session_id"] = session_id
+                            line = "data: " + json.dumps(payload)
+                        except Exception:
+                            pass
+                    yield line + "\n"
+                    current_event = None   # reset after data line
+                elif not line:
+                    yield "\n"   # blank line = SSE event terminator
+                # silently drop other lines (SSH banner messages, etc.)
+
+        finally:
+            await loop.run_in_executor(None, proc.wait)
+
+    # Dispatch to remote GPU via SSH if configured
+    from api.routes.train import _load_remote_cfg, _remote_ssh_active
+    _remote = _load_remote_cfg()
+    if _remote_ssh_active(_remote):
+        return StreamingResponse(
+            event_stream_ssh(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",

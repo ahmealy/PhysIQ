@@ -409,7 +409,23 @@ async def list_checkpoints(domain: str = "cylinder_flow"):
             result.append({"path": path, "domain": domain, "architecture": "?",
                            "epoch": 0, "valid_loss": None, "is_default": path == default,
                            "label": path})
-    return {"checkpoints": result}
+    # Build arch summary: best (lowest valid_loss) physics checkpoint per domain × arch
+    arch_summary: dict = {}
+    for _dom in ["cylinder_flow", "flag_simple"]:
+        arch_summary[_dom] = {}
+        for _arch in ["gn", "tns", "sage"]:
+            _phys = [
+                r for r in result
+                if r["domain"] == _dom
+                and r["architecture"] == _arch
+                and r["valid_loss"] is not None
+                and not any(x in r["path"] for x in ["cvae", "surrogate"])
+            ]
+            arch_summary[_dom][_arch] = (
+                min(_phys, key=lambda x: x["valid_loss"]) if _phys else None
+            )
+
+    return {"checkpoints": result, "arch_summary": arch_summary}
 
 
 @router.post("/rollout")

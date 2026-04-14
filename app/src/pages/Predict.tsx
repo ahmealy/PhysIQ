@@ -12,6 +12,8 @@ export const Predict: React.FC = () => {
   const [checkpointLoading, setCheckpointLoading] = useState(false);
   const [checkpointList, setCheckpointList] = useState<any[]>([]);
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<string>('');  // '' = use domain default
+  const [selectedArch, setSelectedArch] = useState<string>('');
+  const [archSummary, setArchSummary] = useState<Record<string, Record<string, any>> | null>(null);
   const [trajectoryIndex, setTrajectoryIndex] = useState(() => parseInt(searchParams.get('traj') || '0', 10));
   const [device, setDevice] = useState('cpu');
   const [isRunning, setIsRunning] = useState(false);
@@ -90,6 +92,9 @@ export const Predict: React.FC = () => {
 
   // Load checkpoint info + list when domain changes
   useEffect(() => {
+    setSelectedArch('');
+    setSelectedCheckpoint('');
+    setArchSummary(null);
     setCheckpointLoading(true);
     setCheckpoint(null);
     setSelectedCheckpoint('');
@@ -102,13 +107,14 @@ export const Predict: React.FC = () => {
       .then(d => {
         // Filter to this domain's physics checkpoints only (exclude CVAE/surrogate/util)
         const allCkpts: any[] = d?.checkpoints ?? [];
-        const phys = allCkpts.filter(c =>
+        const phys = allCkpts.filter((c: any) =>
           c.domain === domain &&
           !c.path.includes('cvae') &&
           !c.path.includes('surrogate') &&
-          c.valid_loss !== null  // must have been trained as a physics model
+          c.valid_loss !== null
         );
         setCheckpointList(phys);
+        setArchSummary(d?.arch_summary ?? null);
       })
       .catch(() => { setCheckpointList([]); });
     // Also reload dataset info for the selected domain
@@ -353,27 +359,51 @@ export const Predict: React.FC = () => {
                 </div>
               )}
 
-              {/* Model / checkpoint selector — shown when checkpoints are available */}
-              {checkpointList.length >= 1 && (
+              {/* Architecture selector — GN / TNS / SAGE buttons */}
+              {archSummary !== null && (
                 <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Model Checkpoint</label>
-                  <select
-                    value={selectedCheckpoint}
-                    onChange={e => setSelectedCheckpoint(e.target.value)}
-                    disabled={isRunning}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-blue-500/50 transition-colors disabled:opacity-50"
-                  >
-                    <option value="">— Domain default —</option>
-                    {checkpointList.map(c => (
-                      <option key={c.path} value={c.path}>
-                        {c.label}{c.is_default ? ' ★' : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Model Architecture</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['gn', 'tns', 'sage'] as const).map(arch => {
+                      const best = archSummary?.[domain]?.[arch];
+                      const isAvail = !!best;
+                      const isSelected = selectedArch === arch;
+                      return (
+                        <button
+                          key={arch}
+                          disabled={!isAvail || isRunning}
+                          onClick={() => {
+                            setSelectedArch(arch);
+                            setSelectedCheckpoint(best?.path ?? '');
+                          }}
+                          title={
+                            isAvail
+                              ? `${arch.toUpperCase()}: ep${best.epoch} · loss=${best.valid_loss?.toFixed(4)}`
+                              : `${arch.toUpperCase()}: not trained yet`
+                          }
+                          className={cn(
+                            'py-2 rounded-lg text-xs font-bold transition-colors border',
+                            isSelected && isAvail
+                              ? 'bg-blue-600/30 border-blue-500/60 text-blue-300'
+                              : isAvail
+                                ? 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
+                                : 'bg-slate-900/50 border-slate-800/50 text-slate-600 cursor-not-allowed opacity-50',
+                          )}
+                        >
+                          <div>{arch.toUpperCase()}</div>
+                          <div className="text-[9px] font-normal mt-0.5">
+                            {isAvail
+                              ? `ep${best.epoch} · ${best.valid_loss?.toFixed(4)}`
+                              : 'not trained'}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                   <p className="text-[10px] text-slate-500">
-                    {checkpointList.length > 1
-                      ? 'Choose a specific checkpoint to compare GN / TNS / SAGE on the same trajectory.'
-                      : 'Train multiple architectures (GN, TNS, SAGE) to enable model comparison.'}
+                    {selectedArch && archSummary?.[domain]?.[selectedArch]
+                      ? `${selectedArch.toUpperCase()} champion: ${archSummary[domain][selectedArch].label}`
+                      : 'No arch selected — using domain default (GN)'}
                   </p>
                 </div>
               )}

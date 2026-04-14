@@ -57,6 +57,104 @@ class OODResult:
 
 
 # ---------------------------------------------------------------------------
+# Param-space OOD (4-D design parameter KDTree — no mesh/GNN needed)
+# ---------------------------------------------------------------------------
+
+class ParamSpaceOOD:
+    """
+    OOD confidence based on 4-D design parameter space.
+
+    Scores a generated design (cx, cy, r, v_inlet) by its normalised L2 distance
+    to the nearest training design in data/design_params.npy. No mesh or GNN needed.
+
+    This is the correct OOD tool for the generate pipeline: it asks
+    "are these design params within the training distribution?" rather than
+    "does this mesh embed similarly to training meshes?" (which is always true
+    if we use RealMeshLookup, and always false if we use synthetic meshes).
+
+    Formula mirrors NearestNeighborIndex exactly:
+        confidence = clip(1 - d_min / (train_diameter + 1e-12), 0, 1)
+    where train_diameter = 95th percentile of leave-one-out NN distances in training set.
+    """
+
+    DEFAULT_THRESHOLD: float = 0.3
+
+    def __init__(self, dataset_path: str = 'data', ood_threshold: float = DEFAULT_THRESHOLD):
+        self._threshold = ood_threshold
+        self._tree = None
+        self._p_min = None
+        self._scale = None
+        self.train_diameter: float = 1.0
+
+        npy_path = os.path.join(dataset_path, 'design_params.npy')
+        if not os.path.exists(npy_path):
+            return  # available == False; score() returns -1.0
+
+        try:
+            params = np.load(npy_path).astype(np.float64)  # [N, 4]: cx,cy,r,v_inlet
+            if params.ndim != 2 or params.shape[1] < 4:
+                return
+
+            # Per-column min/max normalisation to [0, 1]
+            p_min = params.min(axis=0)   # [4]
+            p_max = params.max(axis=0)   # [4]
+            scale = p_max - p_min
+            scale[scale < 1e-12] = 1.0   # degenerate column guard
+            self._p_min = p_min
+            self._scale = scale
+
+            norm_params = (params - p_min) / scale  # [N, 4]
+
+            # Build KDTree
+            from scipy.spatial import KDTree
+            self._tree = KDTree(norm_params)
+
+            # train_diameter = 95th percentile of leave-one-out NN distances
+            # Identical formula to NearestNeighborIndex.build() in confidence/index.py
+            dists, _ = self._tree.query(norm_params, k=2)  # k=2: skip self (dist=0)
+            self.train_diameter = float(np.percentile(dists[:, 1], 95))
+        except Exception:
+            self._tree = None  # graceful degradation
+
+    @property
+    def available(self) -> bool:
+        """True if design_params.npy was loaded successfully."""
+        return self._tree is not None
+
+    def score(self, cx: float, cy: float, r: float, v_inlet: float) -> 'OODResult':
+        """
+        Score a generated design by its distance to training params.
+
+        Returns OODResult with confidence in [0, 1] (1 = in-distribution),
+        or confidence=-1.0 if design_params.npy was not available.
+        """
+        if self._tree is None:
+            return OODResult(
+                confidence=-1.0,
+                is_ood=False,
+                threshold=self._threshold,
+                embedding=np.zeros(4, dtype=np.float32),
+            )
+
+        query = np.array([cx, cy, r, v_inlet], dtype=np.float64)
+        q_norm = (query - self._p_min) / self._scale  # normalise to [0,1]^4
+
+        # Distance to nearest training param
+        d_min, _ = self._tree.query(q_norm.reshape(1, -1), k=1)
+        d_min = float(d_min[0])
+
+        # Identical formula to NearestNeighborIndex.query() in confidence/index.py
+        confidence = float(np.clip(1.0 - d_min / (self.train_diameter + 1e-12), 0.0, 1.0))
+
+        return OODResult(
+            confidence=confidence,
+            is_ood=confidence < self._threshold,
+            threshold=self._threshold,
+            embedding=q_norm.astype(np.float32),  # repurpose embedding field for normalised params
+        )
+
+
+# ---------------------------------------------------------------------------
 # Abstract scorer interface (Dependency Inversion / Open-Closed)
 # ---------------------------------------------------------------------------
 

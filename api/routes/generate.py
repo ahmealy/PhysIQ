@@ -303,6 +303,7 @@ class CFDDesignSampler(BaseDesignSampler):
         _use_gnn = (
             self._simulator is not None
             and self._mesh_lookup is not None
+            and self._mesh_lookup.available
             and self._dataset is not None
         )
         if _use_gnn:

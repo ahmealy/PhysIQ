@@ -295,6 +295,182 @@ class ClothMeshBuilder(BaseMeshBuilder):
 
 
 # ---------------------------------------------------------------------------
+# Real mesh lookup (nearest-neighbour by geometry)
+# ---------------------------------------------------------------------------
+
+class RealMeshLookup:
+    """
+    Finds the nearest real CFD training mesh for given design parameters.
+
+    Used for CFD gradient coupling — loads a real OpenFOAM mesh and injects
+    v_inlet as a differentiable tensor so ``∂drag/∂v_inlet`` is non-zero.
+
+    The lookup is a nearest-neighbour search over (cx, cy, r) in the training
+    set.  v_inlet is excluded because it is the gradient variable; only
+    cylinder geometry determines which real mesh topology to use.
+
+    Algorithm
+    ---------
+    1. ``__init__``: load ``data/design_params.npy`` [N, 4] and compute
+       per-column min/max for L2-normalisation.
+    2. ``find_nearest(cx, cy, r)``: normalise query, compute L2 to all rows,
+       return the argmin trajectory index.
+    3. ``load_mesh_for_trajectory(traj_idx, v_inlet, dataset, device)``:
+       load the first timestep of that trajectory from ``FpcDataset``,
+       apply PyG transforms, replace INFLOW node x-velocity with the
+       differentiable ``v_inlet`` tensor.
+    """
+
+    def __init__(self, dataset_path: str = 'data') -> None:
+        """
+        Args:
+            dataset_path: Directory containing ``design_params.npy``.
+        """
+        self._params: Optional[np.ndarray] = None   # [N, 3]  (cx, cy, r only)
+        self._norm_params: Optional[np.ndarray] = None
+        self._p_min: Optional[np.ndarray] = None
+        self._p_max: Optional[np.ndarray] = None
+
+        dp_path = os.path.join(dataset_path, 'design_params.npy')
+        if not os.path.exists(dp_path):
+            # Graceful degradation — lookup will always return trajectory 0
+            return
+
+        try:
+            params = np.load(dp_path)          # [N, 4]: [cx, cy, r, v_inlet]
+            if params.ndim != 2 or params.shape[1] < 3:
+                return
+            geom = params[:, :3].astype(np.float64)   # cx, cy, r only
+            p_min = geom.min(axis=0)
+            p_max = geom.max(axis=0)
+            scale = p_max - p_min
+            # Avoid division by zero for degenerate dimensions
+            scale[scale < 1e-12] = 1.0
+            self._params      = geom
+            self._p_min       = p_min
+            self._p_max       = p_max
+            self._norm_params = (geom - p_min) / scale    # [N, 3] ∈ [0,1]
+        except Exception:
+            pass   # silent — _params stays None, find_nearest returns 0
+
+    @property
+    def available(self) -> bool:
+        """True when design_params.npy was loaded successfully."""
+        return self._params is not None
+
+    def find_nearest(self, cx: float, cy: float, r: float) -> int:
+        """
+        Find the trajectory index whose cylinder geometry is closest to
+        (cx, cy, r) under L2 distance on normalised coordinates.
+
+        Args:
+            cx, cy: cylinder centre
+            r:      cylinder radius
+
+        Returns:
+            Trajectory index (0-based) into the training dataset.
+            Returns 0 if design_params were not loaded.
+        """
+        if self._norm_params is None or self._p_min is None:
+            return 0
+
+        query = np.array([cx, cy, r], dtype=np.float64)
+        scale = self._p_max - self._p_min
+        scale[scale < 1e-12] = 1.0
+        q_norm = (query - self._p_min) / scale           # [3]
+        diffs  = self._norm_params - q_norm               # [N, 3]
+        dists  = (diffs ** 2).sum(axis=1)                 # [N]
+        return int(np.argmin(dists))
+
+    def load_mesh_for_trajectory(
+        self,
+        trajectory_index: int,
+        v_inlet: torch.Tensor,   # [1] differentiable scalar tensor
+        dataset,                 # FpcDataset
+        device: str = 'cpu',
+    ) -> Data:
+        """
+        Load the real mesh for ``trajectory_index`` and inject ``v_inlet``.
+
+        The graph is loaded from the first timestep of the trajectory so the
+        initial velocity field is as clean as possible.  INFLOW nodes
+        (node_type == NodeType.INFLOW == 4) have their x-velocity feature
+        replaced by ``v_inlet`` to maintain differentiability.
+
+        Args:
+            trajectory_index: which trajectory to load (row in dataset).
+            v_inlet:          [1] or scalar differentiable tensor for inlet
+                              velocity.  Gradient flows through this tensor.
+            dataset:          loaded FpcDataset (or compatible).
+            device:           torch device string.
+
+        Returns:
+            PyG ``Data`` with ``edge_index`` / ``edge_attr`` already built
+            (T.FaceToEdge + T.Cartesian + T.Distance applied).
+            ``graph.x[:, 1]`` for INFLOW nodes is set to ``v_inlet``.
+        """
+        import torch_geometric.transforms as _T
+
+        _INFLOW_TYPE: int = 4   # NodeType.INFLOW
+
+        transformer = _T.Compose([
+            _T.FaceToEdge(),
+            _T.Cartesian(norm=False),
+            _T.Distance(norm=False),
+        ])
+
+        # First timestep of this trajectory:
+        #   dataset index = traj_idx * num_sampes_per_tra + 0
+        n_steps   = dataset.num_sampes_per_tra
+        # Clamp to valid range
+        traj_idx  = max(0, min(trajectory_index,
+                               len(dataset) // n_steps - 1))
+        item_idx  = traj_idx * n_steps   # step 0
+
+        graph = dataset[item_idx]          # Data(x, pos, face, y)
+        graph = transformer(graph)
+        graph = graph.to(device)
+
+        # v_inlet injection: replace vx for INFLOW nodes
+        # x layout: [node_type, vx, vy]  (shape [N, 3])
+        inflow_mask = (graph.x[:, 0] == _INFLOW_TYPE)   # [N] bool
+
+        # Build a new x tensor that shares storage for all non-injected
+        # entries and uses v_inlet for INFLOW vx, preserving grad_fn.
+        v_inlet_dev = v_inlet.to(device)   # keep on correct device
+
+        # We need a differentiable replacement; use torch.where on a
+        # pre-built "all v_inlet" tensor so autograd can trace through.
+        vx_col = graph.x[:, 1].clone()
+        # scatter v_inlet into INFLOW positions via masked_fill-alike
+        # but staying differentiable w.r.t. v_inlet:
+        inflow_idx = inflow_mask.nonzero(as_tuple=True)[0]   # indices
+        if inflow_idx.numel() > 0:
+            # Build replacement column: broadcast v_inlet to all INFLOW nodes
+            vx_new = vx_col.detach().clone()          # [N] — starts as copy
+            # Differentiable splice: create a new tensor by index assignment
+            # Using index_put_ on a clone preserves the computation graph
+            # relative to v_inlet.
+            # Strategy: build vx column as detached base + differentiable delta
+            delta = torch.zeros_like(vx_col)          # [N] zeros, no grad
+            v_expanded = v_inlet_dev.expand(inflow_idx.shape[0])  # [n_inflow]
+            delta = delta.index_put(
+                (inflow_idx,),
+                v_expanded - vx_col[inflow_idx].detach(),
+            )
+            vx_new = vx_col.detach() + delta          # carries grad_fn
+
+            # Reconstruct x with differentiable vx column
+            graph.x = torch.cat([
+                graph.x[:, 0:1],         # node_type  [N, 1]
+                vx_new.unsqueeze(1),      # vx         [N, 1] — differentiable
+                graph.x[:, 2:3],          # vy         [N, 1]
+            ], dim=1)                     # [N, 3]
+
+        return graph
+
+
+# ---------------------------------------------------------------------------
 # Factory (Open / Closed)
 # ---------------------------------------------------------------------------
 

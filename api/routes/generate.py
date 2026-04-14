@@ -132,6 +132,36 @@ class CFDDesignSampler(BaseDesignSampler):
     CFD_CVAE_PATH  = "checkpoints/cfd_cvae.pth"
     SURROGATE_PATH = "checkpoints/drag_surrogate.pth"
 
+    def __init__(self) -> None:
+        import logging
+        self._mesh_lookup = None   # RealMeshLookup (nearest real mesh by geometry)
+        self._simulator   = None   # GNN Simulator (for GNN-in-the-loop gradient)
+        self._dataset     = None   # FpcDataset (training split, for mesh loading)
+        try:
+            from extensions.generative.mesh_generator import RealMeshLookup
+            self._mesh_lookup = RealMeshLookup(dataset_path='data')
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "RealMeshLookup unavailable: %s", e
+            )
+        try:
+            from api.state import get_model, DOMAINS
+            cfd_ckpt = DOMAINS["cylinder_flow"]["checkpoint"]
+            if os.path.exists(cfd_ckpt):
+                self._simulator = get_model(cfd_ckpt, device='cpu')
+                self._simulator.eval()
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "GNN simulator unavailable for gradient coupling: %s", e
+            )
+        try:
+            from dataset import FpcDataset
+            self._dataset = FpcDataset(data_root='data', split='train')
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Training dataset unavailable for mesh lookup: %s", e
+            )
+
     def sample(self, target: float, n: int, device: str,
                method: str = "sample") -> tuple[list, list]:
         """
@@ -232,22 +262,34 @@ class CFDDesignSampler(BaseDesignSampler):
     def _gradient_sample(self, trainer, surrogate_trainer,
                          target: float, n: int, device: str):
         """
-        Gradient descent in CVAE latent space using the differentiable surrogate.
+        Gradient descent in CVAE latent space.
 
-        Full chain (every step differentiable w.r.t. z):
-            z [16]
-            → CVAE decoder  → params_norm [4]     (linear layers)
-            → denorm        → params_phys [4]     (affine, differentiable)
-            → surrogate norm→ params_surr [4]     (affine, differentiable)
-            → DragSurrogate → drag_pred   [1]     (MLP forward, no no_grad)
-            → MSE loss = (drag_pred - target)²
+        When a GNN simulator and real-mesh lookup are available the chain is:
+
+            z [L]
+            → CVAE decoder  → params_phys [4]     (cx, cy, r, v_inlet)
+            → RealMeshLookup.find_nearest(cx,cy,r) → trajectory index  (discrete)
+            → load real OpenFOAM mesh + inject v_inlet differentiably
+            → GNN rollout (K-1 detached steps + 1 differentiable step)
+            → drag_proxy = mean(|vx|) over OUTFLOW nodes
+            → MSE loss = (drag_proxy - target)²
+
+        Gradient flows through:  v_inlet → GNN final step → OUTFLOW vx → loss.
+        cx, cy, r have zero gradient (discrete mesh lookup) but are guided by
+        the CVAE encoder's prior.
+
+        Falls back to the DragSurrogate MLP when the simulator or mesh lookup
+        is unavailable (no checkpoint / data).
 
         After convergence the optimal z* is found.
         n diverse candidates are produced by sampling z ~ N(z*, σ²I)
         so the output shares the same design intent but varies geometrically.
         """
+        import logging
         import torch
         import torch.nn.functional as F
+
+        _logger = logging.getLogger(__name__)
 
         model     = trainer._model.to(device)
         surrogate = surrogate_trainer._model.to(device)
@@ -256,6 +298,16 @@ class CFDDesignSampler(BaseDesignSampler):
 
         model.eval()
         surrogate.eval()
+
+        # Move GNN to target device (it was initialised on 'cpu' in __init__)
+        _use_gnn = (
+            self._simulator is not None
+            and self._mesh_lookup is not None
+            and self._dataset is not None
+        )
+        if _use_gnn:
+            self._simulator.to(device)
+            self._simulator.eval()
 
         drag_norm = float(
             (target - sc_cvae.drag_min) / (sc_cvae.drag_max - sc_cvae.drag_min + 1e-8)
@@ -271,15 +323,126 @@ class CFDDesignSampler(BaseDesignSampler):
         y_min = float(sc_surr.y_min)
         y_max = float(sc_surr.y_max)
 
+        # NodeType.OUTFLOW == 5  (hardcoded to avoid import in hot path)
+        _OUTFLOW_TYPE = 5
+
+        # Number of GNN rollout steps; only the last step is differentiable.
+        # Keep K small (10) for speed — enough to propagate velocity downstream.
+        K_ROLLOUT = 10
+
+        def _gnn_drag(params_p: torch.Tensor) -> torch.Tensor:
+            """
+            Load nearest real mesh, inject v_inlet, run K-step GNN rollout,
+            return drag proxy (scalar, differentiable w.r.t. v_inlet).
+
+            params_p: [4] physical params (cx, cy, r, v_inlet) — detachable
+                       except v_inlet which must keep requires_grad.
+            """
+            cx_val   = float(params_p[0].item())
+            cy_val   = float(params_p[1].item())
+            r_val    = float(params_p[2].item())
+            v_in_t   = params_p[3:4]          # [1], keeps grad_fn
+
+            traj_idx = self._mesh_lookup.find_nearest(cx_val, cy_val, r_val)
+            graph    = self._mesh_lookup.load_mesh_for_trajectory(
+                traj_idx, v_in_t, self._dataset, device=device
+            )
+
+            # Save masks now — sim.forward() overwrites graph.x in-place
+            # with normalised node attributes, so we must capture them first.
+            orig_x        = graph.x.detach().clone()       # [N, 3] original
+            node_type_col = orig_x[:, 0]                   # [N]
+            boundary_mask = ~(
+                (node_type_col == 0) |                     # NORMAL
+                (node_type_col == _OUTFLOW_TYPE)            # OUTFLOW
+            )
+            outflow_mask  = (node_type_col == _OUTFLOW_TYPE)
+            inflow_mask   = (node_type_col == 4)            # NodeType.INFLOW
+
+            # Detached warm-up steps — advance the velocity field K-1 steps
+            # without tracking gradients (saves memory and compute).
+            current_x = orig_x.clone()              # [N, 3], no grad
+            with torch.no_grad():
+                for _ in range(K_ROLLOUT - 1):
+                    graph.x = current_x
+                    next_vel = self._simulator(graph, velocity_sequence_noise=None)
+                    # Pin boundary nodes to their current values
+                    next_vel[boundary_mask] = current_x[boundary_mask, 1:3]
+                    current_x = torch.cat([
+                        current_x[:, 0:1],           # node_type column
+                        next_vel,                     # updated velocities [N, 2]
+                    ], dim=1)                         # [N, 3]
+
+            # Re-inject v_inlet into INFLOW nodes BEFORE the differentiable
+            # final step.  This is the critical link: v_inlet → INFLOW velocity
+            # → GNN message passing → OUTFLOW velocity → drag proxy → loss.
+            # We splice differentiably using index_put on a detached base.
+            inflow_idx = inflow_mask.nonzero(as_tuple=True)[0]
+            vx_warm    = current_x[:, 1].clone()           # [N] detached warm-up vx
+            if inflow_idx.numel() > 0:
+                v_expanded = v_in_t.expand(inflow_idx.shape[0])   # [n_inflow]
+                delta_vx   = torch.zeros_like(vx_warm)
+                delta_vx   = delta_vx.index_put(
+                    (inflow_idx,),
+                    v_expanded - vx_warm[inflow_idx].detach(),
+                )
+                vx_col = vx_warm.detach() + delta_vx      # carries grad_fn
+            else:
+                vx_col = vx_warm
+
+            # Build final input x with differentiable vx for INFLOW nodes
+            final_input_x = torch.cat([
+                current_x[:, 0:1],                        # node_type [N, 1]
+                vx_col.unsqueeze(1),                       # vx        [N, 1]
+                current_x[:, 2:3],                        # vy        [N, 1]
+            ], dim=1)                                      # [N, 3]
+
+            # Final differentiable GNN step
+            graph.x   = final_input_x
+            final_vel = self._simulator(graph, velocity_sequence_noise=None)
+            # Pin boundary nodes (detached) — INFLOW vx is already set above,
+            # but the boundary pin would overwrite it with detached values.
+            # Instead, use torch.where to zero out gradient at boundary nodes,
+            # while keeping full gradient for OUTFLOW (and NORMAL) nodes.
+            pin_vel   = final_input_x[:, 1:3].detach()    # [N, 2]
+            keep_mask = ~boundary_mask                     # True for NORMAL + OUTFLOW
+            final_vel = torch.where(
+                keep_mask.unsqueeze(1).expand_as(final_vel),
+                final_vel,
+                pin_vel,
+            )
+
+            # Drag proxy: mean |vx| over OUTFLOW nodes
+            if outflow_mask.any():
+                drag_proxy = final_vel[outflow_mask, 0].abs().mean()
+            else:
+                drag_proxy = final_vel[:, 0].abs().mean()
+
+            return drag_proxy
+
         def z_to_drag(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             """z [L] → (drag_phys [scalar], params_phys [4])"""
             params_n   = model.decoder(z.unsqueeze(0), target_t)         # [1, 4]
             params_n   = torch.clamp(params_n, 0.0, 1.0)
             params_p   = params_n * (p_max - p_min) + p_min              # [1, 4] physical
-            params_s   = (params_p - x_min) / (x_max - x_min + 1e-8)    # [1, 4] surrogate-norm
+            params_p   = params_p.squeeze(0)                              # [4]
+
+            if _use_gnn:
+                try:
+                    drag_phys = _gnn_drag(params_p)
+                    return drag_phys, params_p
+                except Exception as _gnn_err:
+                    _logger.warning(
+                        "GNN drag step failed (%s); falling back to surrogate.",
+                        _gnn_err,
+                    )
+                    # fall through to surrogate
+
+            # Surrogate fallback path
+            params_s   = (params_p.unsqueeze(0) - x_min) / (x_max - x_min + 1e-8)
             drag_n_out = surrogate(params_s)                              # [1] normed drag
             drag_phys  = drag_n_out * (y_max - y_min) + y_min            # [1] physical
-            return drag_phys.squeeze(), params_p.squeeze(0)
+            return drag_phys.squeeze(), params_p
 
         # Multi-restart Adam optimisation
         n_restarts = 3

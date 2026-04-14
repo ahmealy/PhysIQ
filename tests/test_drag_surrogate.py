@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import copy
 import math
 import numpy as np
 import pytest
@@ -81,10 +82,14 @@ class TestExtractTrueDrag:
 
         graph = Data(x=x, pos=pos, face=face, y=y)
 
-        # Mock dataset
+        # Mock dataset — return a fresh deepcopy each call so in-place
+        # mutations (e.g. graph.x[:, 1:3] = predicted_velocity) from one
+        # step do not bleed into the next step.
         dataset               = MagicMock()
         dataset.num_sampes_per_tra = n_steps
-        dataset.__getitem__   = MagicMock(return_value=graph)
+        dataset.__getitem__   = MagicMock(
+            side_effect=lambda idx: copy.deepcopy(graph)
+        )
 
         return dataset, graph, node_type
 
@@ -149,6 +154,46 @@ class TestExtractTrueDrag:
         assert math.isfinite(drag)
         # Should be close to 0.7 (OUTFLOW) not 0.1 (other nodes)
         assert abs(drag - 0.7) < 0.1, f"expected ~0.7 (OUTFLOW vx), got {drag}"
+
+    def test_steady_state_frac_uses_last_steps(self):
+        """Verify that steady_state_frac=0.5 averages the LAST 50% of steps, not first."""
+        from extensions.generative.drag_surrogate import extract_true_drag
+
+        total_steps = 10
+        dataset, base_graph, _ = self._make_mock_dataset_and_graph(
+            n_nodes=60, n_steps=total_steps
+        )
+
+        # Track how many times the simulator has been called
+        call_count = [0]
+
+        def mock_forward(graph, velocity_sequence_noise=None):
+            call_count[0] += 1
+            step = call_count[0]
+            # First half of steps → vx=0.1; second half → vx=0.9
+            vx = 0.1 if step <= total_steps // 2 else 0.9
+            out = torch.zeros(graph.x.shape[0], 2)
+            out[:, 0] = vx
+            return out
+
+        simulator       = MagicMock(side_effect=mock_forward)
+        simulator.eval  = MagicMock()
+
+        drag = extract_true_drag(
+            simulator=simulator,
+            dataset=dataset,
+            trajectory_index=0,
+            device='cpu',
+            steady_state_frac=0.5,
+        )
+
+        # steady_state_frac=0.5 must use the LAST 50% (steps 6-10, vx=0.9)
+        # NOT the first 50% (steps 1-5, vx=0.1)
+        assert math.isfinite(drag), f"drag should be finite, got {drag}"
+        assert drag > 0.5, (
+            f"Expected ~0.9 (last steps averaged), got {drag}. "
+            "steady_state_frac may be slicing from the front instead of the back."
+        )
 
 
 # ---------------------------------------------------------------------------

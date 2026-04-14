@@ -178,6 +178,8 @@ class ClothInverseDesigner:
     All steps are differentiable with respect to z.
     """
 
+    ROLLOUT_STEPS: int = 5
+
     def __init__(self,
                  cvae_trainer,           # ClothCVAETrainer (loaded)
                  flag_simulator,         # FlagSimulator (loaded, eval mode)
@@ -275,6 +277,27 @@ class ClothInverseDesigner:
         )
         return graph
 
+    def _rollout(self, start_pos: torch.Tensor, K: int = ROLLOUT_STEPS) -> torch.Tensor:
+        """Run K steps of the cloth simulator from start_pos.
+
+        Gradient chain is preserved (no detach on intermediate steps).
+        Call inside torch.no_grad() for eval, or without for BPTT.
+
+        Args:
+            start_pos: [N, 3] initial world positions (differentiable w.r.t. z)
+            K: number of rollout steps
+        Returns:
+            [N, 3] final world position after K steps
+        """
+        current_pos = start_pos
+        prev_pos = start_pos.clone()
+        for _ in range(K):
+            graph_k = self._build_data_from_pos(current_pos, prev_pos)
+            next_pos = self._simulator(graph_k)
+            prev_pos = current_pos   # no detach — keep gradient chain
+            current_pos = next_pos
+        return current_pos
+
     def optimise(self,
                  target_stress: float,
                  n_iters: int = 100,
@@ -329,18 +352,10 @@ class ClothInverseDesigner:
                 # K=5 full BPTT rollout — gradient flows through all steps back to z.
                 # Running multiple steps lets the cloth reach a recognisable deformed
                 # state so the stress signal and its gradients are meaningful.
-                K           = 5
-                current_pos = world_pos          # differentiable w.r.t. z
-                prev_pos    = world_pos.clone()  # rest / zero-velocity initial state
-
-                for k in range(K):
-                    graph_k     = self._build_data_from_pos(current_pos, prev_pos)
-                    next_pos_k  = self._simulator(graph_k)       # [N, 3]
-                    prev_pos    = current_pos   # keep gradient chain — no detach
-                    current_pos = next_pos_k
+                final_pos = self._rollout(world_pos)
 
                 # Evaluate stress objective on the final rolled-out position
-                loss      = self._objective(current_pos)
+                loss      = self._objective(final_pos)
 
                 loss.backward()
                 optim.step()
@@ -363,16 +378,9 @@ class ClothInverseDesigner:
             with torch.no_grad():
                 wp_best      = self._decode_pose(best_z_t, target_norm)
                 # K=5 rollout for a realistic deformed state (mirrors the training loop)
-                K            = 5
-                cur          = wp_best
-                prv          = wp_best.clone()
-                for _ in range(K):
-                    g_k  = self._build_data_from_pos(cur, prv)
-                    nxt  = self._simulator(g_k)
-                    prv  = cur
-                    cur  = nxt
+                final_eval_pos = self._rollout(wp_best)
                 disp        = torch.norm(
-                    cur[self._objective._normal_mask] -
+                    final_eval_pos[self._objective._normal_mask] -
                     self._objective._mesh_rest[self._objective._normal_mask],
                     dim=-1
                 )

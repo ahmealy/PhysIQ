@@ -286,6 +286,14 @@ def train_start(config: TrainConfig):
     cfg_path = "runs/ui_train_config.json"
 
     # fresh_start: delete existing checkpoint so train.py starts from epoch 1
+    arch = config.architecture or "gn"
+    if config.domain == "flag_simple":
+        arch_ckpt_filename = f"flag_best_model_{arch}.pth"
+    else:
+        arch_ckpt_filename = f"best_model_{arch}.pth"
+    arch_ckpt_path = os.path.join(os.path.dirname(domain_cfg["checkpoint"]), arch_ckpt_filename)
+    checkpoint_exists = os.path.exists(arch_ckpt_path) and not config.fresh_start
+
     if config.fresh_start:
         ckpt_path = domain_cfg["checkpoint"]
         if os.path.exists(ckpt_path):
@@ -414,7 +422,7 @@ def train_start(config: TrainConfig):
         state.save_train_start_time()   # record launch timestamp for elapsed timer
         state.train_process = None   # SSH proc will exit on its own
         state.clear_model_cache()
-        return {"pid": None, "status": "started", "execution": execution}
+        return {"pid": None, "status": "started", "execution": execution, "checkpoint_exists": checkpoint_exists}
     else:
         try:
             proc = subprocess.Popen(
@@ -432,7 +440,7 @@ def train_start(config: TrainConfig):
         state.save_train_pid(proc.pid)   # also removes launching sentinel
         state.save_train_start_time()   # record launch timestamp for elapsed timer
         state.clear_model_cache()
-        return {"pid": proc.pid, "status": "started", "execution": execution}
+        return {"pid": proc.pid, "status": "started", "execution": execution, "checkpoint_exists": checkpoint_exists}
 
 
 @router.post("/stop")
@@ -672,22 +680,25 @@ def kill_process(pid: int):
 
 @router.get("/status")
 async def train_status():
-    # Restore domain-scoped paths from the active config file if server restarted
-    cfg_path = "runs/ui_train_config.json"
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path) as f:
-                saved_domain = json.load(f).get("domain", "cylinder_flow")
-            state.set_active_domain(saved_domain)
-        except Exception:
-            pass
-
     is_running = (
         (state.train_process is not None and state.train_process.poll() is None)
         or state.get_orphan_pid() is not None
     )
     if not is_running:
         state.clear_train_pid()
+
+    # Restore domain-scoped paths from the active config file — but ONLY when
+    # training is running (or on first call after server restart while running).
+    # When not running, keep the in-memory domain set by the most recent
+    # train_start() call so the log path doesn't revert to the previous domain.
+    cfg_path = "runs/ui_train_config.json"
+    if is_running and os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                saved_domain = json.load(f).get("domain", "cylinder_flow")
+            state.set_active_domain(saved_domain)
+        except Exception:
+            pass
     epochs = await asyncio.get_running_loop().run_in_executor(
         None, _parse_log, state.train_log_path
     )

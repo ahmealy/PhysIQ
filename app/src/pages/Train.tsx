@@ -253,10 +253,16 @@ export const Train: React.FC = () => {
       }),
     });
     if (res.ok) {
+      const data = await res.json().catch(() => ({}));
       setIsRunning(true);
       setStartTime(Date.now());
       setElapsed(0);
-      setLogLines([freshStart ? '--- Training started fresh (checkpoint deleted) ---' : '--- Training started (resuming) ---']);
+      const startLabel = freshStart
+        ? '--- Training started fresh (checkpoint deleted) ---'
+        : data.checkpoint_exists
+          ? '--- Training started (resuming from existing checkpoint) ---'
+          : '--- Training started from scratch (no checkpoint found) ---';
+      setLogLines([startLabel]);
       setFreshStart(false);   // reset after use
       setRemoteActive(remoteEnabled && !!remote.host);
       startStreaming();

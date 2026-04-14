@@ -308,56 +308,6 @@ export const Predict: React.FC = () => {
                 )}
               </div>
 
-              {/* Champion model card */}
-              {checkpointLoading ? (
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-slate-500 text-xs">
-                  <div className="w-3 h-3 border-2 border-slate-700 border-t-slate-400 rounded-full animate-spin shrink-0" />
-                  Loading model info…
-                </div>
-              ) : checkpoint ? (
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Cpu className="w-4 h-4 text-blue-400" />
-                      <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Champion Model</span>
-                    </div>
-                    <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-400 text-[9px] font-bold rounded uppercase tracking-wider">👑 Active</span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 font-mono truncate">{checkpoint.path.split('/').pop()}</p>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Epoch</span>
-                      <span className="text-slate-200 font-mono">{checkpoint.epoch}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Val Loss</span>
-                      <span className="text-green-400 font-mono">{checkpoint.valid_loss?.toFixed(6) ?? '—'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Params</span>
-                      <span className="text-slate-200 font-mono">{checkpoint.param_count_m != null ? `${checkpoint.param_count_m} M` : '—'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Size</span>
-                      <span className="text-slate-200 font-mono">{checkpoint.size_mb} MB</span>
-                    </div>
-                  </div>
-                  <p className="text-[9px] text-slate-600">
-                    Trained {new Date(checkpoint.last_modified).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                  </p>
-                </div>
-              ) : status?.domains?.[domain]?.available === false ? (
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-slate-500 text-xs">
-                  <Database className="w-4 h-4 shrink-0" />
-                  This domain has no trained model yet
-                </div>
-              ) : (
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-xs">
-                  <Database className="w-4 h-4 shrink-0 text-yellow-600" />
-                  <span className="text-yellow-600">No trained model found — train first</span>
-                </div>
-              )}
-
               {/* Architecture selector — GN / TNS / SAGE buttons */}
               {archSummary !== null && (
                 <div className="space-y-2">
@@ -406,6 +356,62 @@ export const Predict: React.FC = () => {
                   </p>
                 </div>
               )}
+
+              {/* Champion model card — reflects selected arch or domain default */}
+              {checkpointLoading ? (
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-slate-500 text-xs">
+                  <div className="w-3 h-3 border-2 border-slate-700 border-t-slate-400 rounded-full animate-spin shrink-0" />
+                  Loading model info…
+                </div>
+              ) : (() => {
+                // Use the arch-selected champion if available, fall back to domain default
+                const displayCkpt = (selectedArch && archSummary?.[domain]?.[selectedArch])
+                  ? archSummary[domain][selectedArch]
+                  : checkpoint;
+                return displayCkpt ? (
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Cpu className="w-4 h-4 text-blue-400" />
+                        <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Champion Model</span>
+                      </div>
+                      <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-400 text-[9px] font-bold rounded uppercase tracking-wider">👑 Active</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 font-mono truncate">{displayCkpt.path.split('/').pop()}</p>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Epoch</span>
+                        <span className="text-slate-200 font-mono">{displayCkpt.epoch}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Val Loss</span>
+                        <span className="text-green-400 font-mono">{displayCkpt.valid_loss?.toFixed(6) ?? '—'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Params</span>
+                        <span className="text-slate-200 font-mono">{displayCkpt.param_count_m != null ? `${displayCkpt.param_count_m} M` : '—'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Size</span>
+                        <span className="text-slate-200 font-mono">{displayCkpt.size_mb} MB</span>
+                      </div>
+                    </div>
+                    <p className="text-[9px] text-slate-600">
+                      Trained {new Date(displayCkpt.last_modified).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                    </p>
+                  </div>
+                ) : status?.domains?.[domain]?.available === false ? (
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-slate-500 text-xs">
+                    <Database className="w-4 h-4 shrink-0" />
+                    This domain has no trained model yet
+                  </div>
+                ) : (
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center gap-3 text-xs">
+                    <Database className="w-4 h-4 shrink-0 text-yellow-600" />
+                    <span className="text-yellow-600">No trained model found — train first</span>
+                  </div>
+                );
+              })()}
 
               {/* Trajectory Index with tooltip-style explanation */}
               <div className="space-y-2">

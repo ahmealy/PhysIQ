@@ -4,8 +4,11 @@
 > exists in code today, followed by concrete enhancement proposals. Written for external
 > brainstorming — no fluff, exact numbers and class names throughout.
 >
-> **Last major rearchitecting:** 2026-04-13 — CFD gradient coupling via `RealMeshLookup`,
-> cloth K=5 BPTT fix, `free_bits=0.05`, LHS sampling, `extract_true_drag`, mode removal.
+> **Last major rearchitecting:** 2026-04-14 — `ParamSpaceOOD` (param-space OOD replaces
+> embedding-based OOD in generate pipeline), `RealMeshLookup` for thumbnails (real mesh
+> replaces synthetic `CFDMeshBuilder` in sample path), confidence index rebuilt + staleness
+> warning added. Prior: CFD gradient coupling via `RealMeshLookup`, cloth K=5 BPTT fix,
+> `free_bits=0.05`, LHS sampling, `extract_true_drag`, mode removal.
 
 ---
 
@@ -47,12 +50,15 @@ User: domain=cylinder_flow, target_drag=0.025, method=sample
                 │
   Sort by |predicted_drag - target|, keep top-n
                 │
-  CFDMeshBuilder.build(cx, cy, r, v_inlet) → PyG Data (~973 nodes, ~5492 edges)
+  RealMeshLookup.find_nearest(cx, cy, r) → traj_idx
+  RealMeshLookup.load_mesh_for_trajectory(traj_idx, v_inlet, dataset)
+    → real OpenFOAM PyG Data (~1883 nodes, non-uniform, finer near cylinder)
                 │
   ThumbnailRenderer.render_cfd(graph) → PNG bytes
                 │
-  OOD check: FAISS index at "runs/embedding_index_cylinderflow.pkl"
-    → ood_confidence [0,1] or -1.0 if index missing
+  OOD check: ParamSpaceOOD.score(cx, cy, r, v_inlet)
+    → 4-D param KDTree on data/design_params.npy
+    → ood_confidence [0,1] or -1.0 if design_params.npy missing
                 │
   SSE stream: event:candidate  data:{id, predicted_value, ood_confidence, ...}
                 │
@@ -307,9 +313,9 @@ Physics gradient flow:
 
 ---
 
-### 2.4 Mesh Generators & RealMeshLookup
+### 2.4 Mesh Generators, RealMeshLookup & Confidence
 
-#### `CFDMeshBuilder`
+#### `CFDMeshBuilder` *(deprecated in sample path)*
 
 | Item | Value |
 |---|---|
@@ -322,7 +328,7 @@ Physics gradient flow:
 | Node features | `x [N, 3]` = `[node_type, vx=v_inlet or 0, vy=0]` |
 | Typical output | ~973 nodes, ~5492 edges |
 | Transform | `FaceToEdge → Cartesian(norm=False) → Distance(norm=False)` |
-| **Role** | Used for thumbnail rendering and sample-method scoring only |
+| **Role** | ~~Used for thumbnail rendering and sample-method scoring~~ **DEPRECATED in sample path** (2026-04-14). Thumbnails now use `RealMeshLookup`; OOD now uses `ParamSpaceOOD`. Retained for: `MeshGeneratorFactory` registry, `params_to_graph()` helper, and CLI. |
 
 Node type assignments:
 ```
@@ -334,31 +340,38 @@ dist_cyl < r + 2e-3      → WALL_BOUNDARY
 else                     → NORMAL
 ```
 
-#### `RealMeshLookup` (new — gradient method CFD)
+#### `RealMeshLookup` (gradient method + thumbnails)
 
 **File:** `extensions/generative/mesh_generator.py`
 
 ```
 Purpose: find the nearest real OpenFOAM training trajectory for a given
-         (cx, cy, r) design, load its mesh, inject v_inlet as a
+         (cx, cy, r) design, load its mesh, optionally inject v_inlet as a
          differentiable tensor.
+
+Used in TWO places:
+  1. CFDDesignSampler.sample()  — thumbnail rendering (real mesh visual quality)
+  2. CFDDesignSampler._gradient_sample() — GNN gradient coupling (differentiable v_inlet)
 
 Construction:
   design_params = np.load("design_params.npy")  [N_traj, 4]
-  Normalisation: per-column min-max from the loaded array
+  Normalisation: per-column min-max on cols 0:3 (cx, cy, r)
 
-Lookup: find(cx, cy, r)
-  query = normalise([cx, cy, r, 0.0])           [4] (v_inlet ignored for geometry match)
-  dists = ‖design_params_norm - query‖₂         [N_traj]  (only cols 0:3 used)
+Lookup: find_nearest(cx, cy, r)
+  query = normalise([cx, cy, r])             [3]
+  dists = ‖design_params_norm[:, :3] - query‖₂  [N_traj]
   k     = argmin(dists)
-  returns: traj index k, distance
+  returns: traj index k (int)
 
-Mesh loading: load_real_mesh(k, v_inlet_tensor)
-  npz = load traj_k.npz  (~1876 nodes, real OpenFOAM topology)
-  graph.x[:, 1] = v_inlet_tensor  (injected as differentiable leaf)
-  returns: PyG Data with v_inlet_tensor in the gradient graph
+Mesh loading: load_mesh_for_trajectory(traj_idx, v_inlet_tensor, dataset, device)
+  npz = load traj_k.npz  (~1883 nodes, real OpenFOAM topology, non-uniform
+                           spacing — denser near cylinder)
+  For thumbnails: pass dummy v_inlet (no grad needed)
+  For gradient:   pass differentiable v_inlet_tensor from decoder
+  graph.x[INFLOW, 1] = v_inlet_tensor  (spliced via _inject_scalar_differentiable)
+  returns: PyG Data with edge_index/edge_attr (FaceToEdge+Cartesian+Distance applied)
 
-Differentiability:
+Differentiability (gradient mode):
   v_inlet_tensor IS differentiable → ∂drag/∂v_inlet → ∂loss/∂z (via CFDDecoder)
   k (traj index) is a discrete argmin → cx, cy, r have ZERO gradient through lookup
 ```
@@ -373,6 +386,50 @@ Differentiability:
 | Node features | `x [N, 4]` = `[wx, wy, wz, node_type]` |
 | What changes | Only `world_pos [N,3]` — topology never changes |
 | `prev_x` | `world_pos` (no `.detach()` — differentiable in gradient mode) |
+
+#### `ParamSpaceOOD` *(new — generate pipeline OOD)*
+
+**File:** `extensions/confidence/ood_detector.py`
+
+```
+Purpose: determine whether generated design params are within the training
+         distribution, using a 4-D KDTree over (cx, cy, r, v_inlet).
+
+Why param-space (not mesh-space):
+  - If we used RealMeshLookup meshes for OOD, we'd always query training meshes
+    by definition → always in-distribution.
+  - If we used synthetic CFDMeshBuilder meshes, embedding distance from training
+    GNN embeddings → always OOD (domain shift).
+  - Correct question: "Are these *design params* in the training envelope?"
+
+Construction: ParamSpaceOOD(dataset_path='data')
+  params = np.load("data/design_params.npy")  [N, 4]  (cx, cy, r, v_inlet)
+  Per-column min/max normalisation → norm_params [N, 4] ∈ [0, 1]^4
+  scipy.spatial.KDTree(norm_params)
+  train_diameter = 95th percentile of leave-one-out NN distances
+    (same formula as NearestNeighborIndex.build() in confidence/index.py)
+
+Scoring: score(cx, cy, r, v_inlet) → OODResult
+  q_norm = (query - p_min) / scale             [4] ∈ [0,1]^4
+  d_min = KDTree.query(q_norm, k=1)
+  confidence = clip(1 - d_min / (train_diameter + 1e-12), 0, 1)
+  is_ood = confidence < threshold (default 0.3)
+
+OODResult.embedding field repurposed to store q_norm [4] (normalised params).
+Returns confidence=-1.0 if design_params.npy missing (graceful degradation).
+```
+
+#### Two Distinct Confidence Systems
+
+| Context | Class | Input | Question answered |
+|---------|-------|-------|-------------------|
+| **Generate** (sample path) | `ParamSpaceOOD` | 4-D `(cx, cy, r, v_inlet)` param KDTree | Are these design params within the training envelope? |
+| **Predict** (rollout route) | `NearestNeighborIndex` | 128-D GNN embedding KDTree | Is this test trajectory similar to training trajectories? |
+
+The predict path (`api/routes/rollout.py`) uses `NearestNeighborIndex` from
+`runs/embedding_index_cylinderflow.pkl` — conceptually correct because test trajectories
+are genuinely unseen.  A **staleness warning** is logged if the checkpoint is newer than
+the index by >60 s (guards against stale index after checkpoint retraining).
 
 ---
 
@@ -460,8 +517,9 @@ ClothDesignSampler.CVAE_PATH     = "checkpoints/flag-simple_cvae.pth"
 ClothDesignSampler.PCA_PATH      = "data_flag/train/cloth_pca.pkl"
 ClothDesignSampler.STRESS_PATH   = "data_flag/train/cloth_stress.npy"
 ClothDesignSampler.REF_TRAJ      = "data_flag/train/traj_00000.npz"
-OOD index (CFD):  "runs/embedding_index_cylinderflow.pkl"
-OOD index legacy: "runs/embedding_index.pkl"
+ParamSpaceOOD data:   "data/design_params.npy"              ← generate OOD (param-space)
+Embedding index:      "runs/embedding_index_cylinderflow.pkl" ← predict confidence (128-D)
+Embedding index leg:  "runs/embedding_index.pkl"            ← legacy fallback
 ```
 
 #### Gradient descent hyperparams
@@ -516,7 +574,8 @@ No GNN score row, no score gap row, no deep/quick toggle UI.
 2. Draw `n_candidates` z vectors via LHS mapping to N(0,I) — better latent coverage than randn
 3. Decode all to params via CVAE decoder, score all with DragSurrogate (~1ms each)
 4. Sort by `|predicted - target|`, keep top n_candidates
-5. For each: build Delaunay mesh (thumbnail only), render thumbnail, OOD check
+5. For each: load nearest real OpenFOAM mesh via `RealMeshLookup` (thumbnail), render
+   thumbnail, OOD check via `ParamSpaceOOD.score(cx, cy, r, v_inlet)` (4-D param KDTree)
 6. Stream via SSE — candidates appear in score order
 
 ### Gradient method — what each domain does
@@ -581,7 +640,7 @@ Diversity in both domains: adds Gaussian noise to best_z (`σ=0.25` CFD, `σ=0.2
 | 10 | `Generate.tsx` | Config persisted to localStorage — domain-specific defaults not restored on switch | **Remaining** | Target slider may show wrong domain range |
 | 11 | `PosePCA` / `TorchPCAInverseTransform` | PCA captures only linear deformation modes — wrinkles, folds are nonlinear | **Architectural** | Generated cloth shapes limited to linear combinations of training poses |
 | 12 | `drag_surrogate.py` | `extract_true_drag` requires simulator checkpoint at training time — if absent, falls back to analytical formula | **Remaining** | Drag labels may be formula-based if checkpoint not present during training |
-| 13 | `CFDMeshBuilder` | Synthetic Delaunay mesh (~973 nodes) still used for thumbnails and sample-mode scoring — not the real mesh | **By design** | Thumbnails are approximate; OOD score based on synthetic mesh embeddings |
+| 13 | `CFDMeshBuilder` | ~~Synthetic Delaunay mesh (~973 nodes) still used for thumbnails and sample-mode scoring — not the real mesh~~ | **✅ FIXED** | Thumbnails now load real OpenFOAM mesh via `RealMeshLookup` (~1883 nodes, non-uniform); OOD uses `ParamSpaceOOD` (4-D param space) |
 
 **Previously fixed (documented for reference):**
 
@@ -594,6 +653,9 @@ Diversity in both domains: adds Gaussian noise to best_z (`σ=0.25` CFD, `σ=0.2
 | F5 | ~~Pure `randn` latent sampling~~ — Fixed: LHS (Latin Hypercube Sampling) via `scipy.stats.qmc`, cached `self._lhs_sampler` |
 | F6 | ~~Surrogate trained on analytical formula only~~ — Fixed: `extract_true_drag` provides GNN-rollout drag labels; `DragSurrogateTrainer.fit()` accepts `true_drag_labels` dict |
 | F7 | ~~Deep/quick mode overcomplication~~ — Fixed: `mode` field removed from `GenerateRequest`; `GnnScorer` post-hoc scoring phase removed |
+| F8 | ~~CFD generate OOD always 0 / always flagged OOD~~ — Fixed: `ParamSpaceOOD` replaces `OODDetector`; queries 4-D param KDTree instead of mismatched GNN embedding space |
+| F9 | ~~Synthetic mesh thumbnails (CFDMeshBuilder, ~973 nodes)~~ — Fixed: `RealMeshLookup.load_mesh_for_trajectory()` loads nearest real OpenFOAM mesh (~1883 nodes) |
+| F10 | ~~Stale confidence index (predict route)~~ — Fixed: `embedding_index_cylinderflow.pkl` rebuilt; staleness warning logged if checkpoint is >60 s newer than index |
 
 ---
 
@@ -890,7 +952,45 @@ Novel generated designs (near OOD boundary) have less reliable predictions.
 
 ---
 
-### Summary Table
+### ✅ P16 — Param-Space OOD for Generate Pipeline *(DONE)*
+
+**Was:** `CFDDesignSampler.sample()` passed each synthetic `CFDMeshBuilder` graph through
+the GNN encoder (128-D embedding) and queried a KDTree built from real training embeddings.
+Domain shift between synthetic Delaunay meshes and real OpenFOAM meshes → GNN embedding
+always far from training → `confidence ≈ 0.0` → every candidate flagged OOD.
+
+**Implemented:** `ParamSpaceOOD` in `extensions/confidence/ood_detector.py`:
+- Loads `data/design_params.npy` [N, 4] (cx, cy, r, v_inlet)
+- Normalises all 4 columns to [0, 1], builds `scipy.spatial.KDTree`
+- `confidence = clip(1 − d_min / train_diameter, 0, 1)` where `train_diameter` is the
+  95th-percentile leave-one-out NN distance (identical formula to `NearestNeighborIndex`)
+- Wired into `CFDDesignSampler.__init__` as `self._param_ood`; called in `sample()` as
+  `self._param_ood.score(cx, cy, r, v_in)`
+- No GNN or mesh required; gracefully degrades to `confidence=-1.0` if file missing
+
+**Why param-space is correct here:** If we used `RealMeshLookup` meshes for OOD we'd always
+query training meshes by definition → always in-distribution. The right question is whether
+the *design params* are in the training envelope.
+
+---
+
+### ✅ P17 — Real Mesh Thumbnails via RealMeshLookup *(DONE)*
+
+**Was:** `CFDDesignSampler.sample()` called `CFDMeshBuilder.build(cx, cy, r, v_inlet)` to
+generate a synthetic Delaunay triangulation (~973 nodes, uniform spacing) for thumbnails.
+Visual quality was poor — no cylinder wake structure, no boundary layer refinement.
+
+**Implemented:** `RealMeshLookup.load_mesh_for_trajectory()` in `sample()`:
+- `find_nearest(cx, cy, r)` → closest real training trajectory index by normalised L2
+- `load_mesh_for_trajectory(traj_idx, dummy_v_inlet, dataset, device='cpu')` → real
+  OpenFOAM PyG Data (~1883 nodes, non-uniform spacing, finer near cylinder)
+- Thumbnail rendered from the real mesh → accurate velocity-magnitude heatmap
+- Gracefully skips thumbnail (sets `graph=None`) if `RealMeshLookup` is unavailable
+
+`CFDMeshBuilder` is retained for `MeshGeneratorFactory` registry, `params_to_graph()`
+helper, and CLI smoke test but is no longer used in `CFDDesignSampler.sample()`.
+
+---
 
 | # | Enhancement | Files | Effort | Status |
 |---|---|---|---|---|
@@ -900,6 +1000,8 @@ Novel generated designs (near OOD boundary) have less reliable predictions.
 | P4 | LHS sampling | `cvae_cfd.py`, `cvae_cloth.py` | 5 min | ✅ DONE |
 | P5 | True drag labels (extract_true_drag) | `drag_surrogate.py`, `train_cvae.py` | 1-2 weeks | ✅ DONE |
 | P6 | Remove deep/quick mode toggle | `generate.py`, `Generate.tsx`, `CandidateCard.tsx` | 1 day | ✅ DONE |
+| P16 | Param-space OOD for generate pipeline | `ood_detector.py`, `generate.py` | 0.5 days | ✅ DONE |
+| P17 | Real mesh thumbnails via RealMeshLookup | `generate.py`, `mesh_generator.py` | 0.5 days | ✅ DONE |
 | P7 | Fully differentiable CFD (all params) | `mesh_generator.py`, `generate.py` | 1-2 weeks | 🔲 PENDING |
 | P8 | Longer cloth BPTT (K=20+) | `inverse_design.py` | 0.5 days | 🔲 PENDING |
 | P9 | Graph VAE replacing PCA (cloth) | `cvae_cloth.py`, `cloth_extractor.py` | 1-2 weeks | 🔲 PENDING |
@@ -917,5 +1019,7 @@ Novel generated designs (near OOD boundary) have less reliable predictions.
 
 ---
 
-*Document updated 2026-04-13 to reflect the rearchitected generate pipeline.*
+*Document updated 2026-04-14 — ParamSpaceOOD (generate OOD), real-mesh thumbnails*
+*(RealMeshLookup in sample path), confidence index rebuilt + staleness warning.*
+*Prior update 2026-04-13 — rearchitected generate pipeline.*
 *All class names, file paths, tensor shapes, and hyperparameters are exact values from source.*

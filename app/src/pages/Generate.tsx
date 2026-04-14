@@ -82,6 +82,7 @@ export const Generate: React.FC = () => {
       device:       'cpu',
     })
   );
+  const [gpuAvailable, setGpuAvailable] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [candidates, setCandidates]     = useState<Candidate[]>(() =>
     loadLS<Candidate[]>(LS_CANDIDATES, [])
@@ -100,6 +101,16 @@ export const Generate: React.FC = () => {
   const navigate = useNavigate();
 
   const domCfg = DOMAIN_CONFIGS[config.domain as keyof typeof DOMAIN_CONFIGS];
+
+  // ── GPU auto-detection (mirrors Predict.tsx) ───────────────────────────────
+  useEffect(() => {
+    fetch('/api/status').then(r => r.json()).then(s => {
+      setGpuAvailable(!!s.gpu_available);
+      if (s.gpu_available) {
+        setConfig(c => c.device === 'cpu' ? { ...c, device: 'cuda:0' } : c);
+      }
+    }).catch(() => { /* status unavailable — keep cpu */ });
+  }, []);
 
   // ── Analyze handler — run rollout then open Visualize ─────────────────────
 
@@ -297,6 +308,20 @@ export const Generate: React.FC = () => {
               <option value="gradient">Gradient Descent</option>
             </select>
           </div>
+
+          {/* Device */}
+          <div className="space-y-2">
+            <label className="text-xs text-slate-400 font-medium">Compute Device</label>
+            <select
+              value={config.device}
+              onChange={e => setConfig(c => ({ ...c, device: e.target.value }))}
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            >
+              <option value="cpu">CPU</option>
+              {gpuAvailable && <option value="cuda:0">GPU (cuda:0)</option>}
+            </select>
+          </div>
+
         </div>
 
         {/* Domain description */}

@@ -87,7 +87,15 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
         )}
 
         {/* OOD badge overlay */}
-        <div className={cn(
+        <div
+          title={
+            !hasConf
+              ? 'Confidence unavailable (design_params.npy not found)'
+              : isOod
+                ? `OOD: these design parameters are outside the training envelope (confidence ${confPct}%). Results may be less reliable.`
+                : `${confPct}% confidence: these design parameters are within the training envelope. Measured by nearest-neighbour distance in 4-D param space (cx, cy, r, v_inlet).`
+          }
+          className={cn(
           "absolute top-2 right-2 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold",
           !hasConf
             ? "bg-slate-700/60 border border-slate-600/40 text-slate-400"

@@ -288,7 +288,9 @@ def get_rmse(filename: str):
         "rmse_at_599":    _safe_float(float(per_step_rmse[min(598, T - 1)])),
         "mae_at_0":       _safe_float(float(per_step_mae[0])),
         "mae_at_end":     _safe_float(float(per_step_mae[-1])),
-        "growth_ratio":   _safe_float(float(per_step_rmse[-1] / (per_step_rmse[0] + 1e-12))),
+        # Use rmse[1] as the baseline (rmse[0] is always 0 — the model's input at t=0
+        # is identical to GT, so the first "error" is a meaningless 0/epsilon division).
+        "growth_ratio":   _safe_float(float(per_step_rmse[-1] / (per_step_rmse[1] + 1e-12)) if T > 1 else None),
         "target_field":   target_field,
     }
 

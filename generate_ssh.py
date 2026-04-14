@@ -14,20 +14,24 @@ stdout lines (named SSE):
     data: {"values": [...]}
 
     event: candidate
-    data: {<CandidateResult fields>, "thumbnail_b64": "<base64 png or null>", "session_id": null}
+    data: {<CandidateResult fields>, "thumbnail_url": "/api/...", "session_id": "<uuid>"}
 
     event: done
-    data: {"best_id": <int>, "session_id": null}
+    data: {"best_id": <int>, "session_id": "<uuid>"}
 
     event: error
     data: {"detail": "...traceback..."}
 
 The -u flag is required to disable output buffering; sys.stdout.reconfigure
 on line 1 provides a second layer of defence when -u is omitted.
+
+NFS design: thumbnails and graphs are saved to disk (runs/thumbnails/ and
+runs/graphs/) so the local API server can serve them without any scp.
+The session_id is written into the config by the API server so both sides
+use the same path.
 """
 
 import argparse
-import base64
 import dataclasses
 import json
 import os
@@ -82,6 +86,10 @@ def _run(cfg: dict) -> None:
     n_candidates  = int(cfg["n_candidates"])
     method        = cfg.get("method", "sample")
     device        = cfg.get("device", "cuda:0")
+    # session_id is written by the API server into the config so the remote
+    # script uses the same ID — shared NFS means graph/thumbnail paths are
+    # visible on both sides without any file transfer.
+    session_id    = cfg.get("session_id")
 
     # Import samplers and renderer from the API module (project is on sys.path).
     from api.routes.generate import _DOMAIN_SAMPLERS, ThumbnailRenderer
@@ -101,14 +109,44 @@ def _run(cfg: dict) -> None:
     if trajectory:
         _sse("trajectory", {"values": list(trajectory)})
 
+    # ── Thumbnails via NFS ───────────────────────────────────────────────────
+    # On a shared filesystem both the remote worker and the local API server
+    # see the same paths, so we save PNG files to disk instead of base64-
+    # encoding them.  The API relay layer looks for these files and skips the
+    # thumbnail_b64 decode path entirely.
+    thumb_dir = None
+    if session_id:
+        thumb_dir = os.path.join(_ROOT, "runs", "thumbnails", session_id)
+        os.makedirs(thumb_dir, exist_ok=True)
+
+    # ── Graph cache via NFS ──────────────────────────────────────────────────
+    # Save each graph to disk so the API's /generate/rollout/{session_id}/{id}
+    # endpoint can load and analyse them (Analyze button).  Uses pickle since
+    # torch_geometric Data objects are not JSON-serialisable.
+    graph_dir = None
+    if session_id:
+        graph_dir = os.path.join(_ROOT, "runs", "graphs", session_id)
+        os.makedirs(graph_dir, exist_ok=True)
+
     # Stream candidates with rendered thumbnails.
     best_id  = 0
     best_err = float("inf")
 
     for c, graph in results:
-        # Render thumbnail ────────────────────────────────────────────────────
-        thumb_b64 = None
-        if graph is not None:
+        # Save graph to disk for Analyze ──────────────────────────────────────
+        if graph_dir and graph is not None:
+            try:
+                import pickle
+                graph_path = os.path.join(graph_dir, "graph_%d.pkl" % c.id)
+                graph.domain = c.domain   # tag domain so rollout endpoint can branch
+                with open(graph_path, "wb") as gf:
+                    pickle.dump(graph, gf)
+            except Exception:
+                pass  # graph save is best-effort
+
+        # Render thumbnail and save to disk ───────────────────────────────────
+        thumbnail_url = None
+        if thumb_dir and graph is not None:
             try:
                 if domain == "cylinder_flow":
                     p   = c.params
@@ -120,14 +158,18 @@ def _run(cfg: dict) -> None:
                     )
                 else:
                     png = ThumbnailRenderer.render_cloth(graph)
-                thumb_b64 = base64.b64encode(png).decode("ascii")
+                thumb_path = os.path.join(thumb_dir, "cand_%d.png" % c.id)
+                with open(thumb_path, "wb") as tf:
+                    tf.write(png)
+                thumbnail_url = "/api/generate/thumbnail/%s/%d" % (session_id, c.id)
             except Exception:
                 pass  # thumbnail is best-effort; never block the candidate stream
 
         # Emit candidate event ────────────────────────────────────────────────
-        payload               = dataclasses.asdict(c)
-        payload["thumbnail_b64"] = thumb_b64
-        payload["session_id"]    = None   # filled in by the API relay layer
+        payload                   = dataclasses.asdict(c)
+        payload["thumbnail_url"]  = thumbnail_url   # direct URL — no base64
+        payload["thumbnail_b64"]  = None            # always null on NFS path
+        payload["session_id"]     = session_id
         _sse("candidate", payload)
 
         # Track best candidate (closest predicted_value to target_value).
@@ -137,7 +179,7 @@ def _run(cfg: dict) -> None:
             best_id  = c.id
 
     # Final done event ────────────────────────────────────────────────────────
-    _sse("done", {"best_id": best_id, "session_id": None})
+    _sse("done", {"best_id": best_id, "session_id": session_id})
 
 
 if __name__ == "__main__":

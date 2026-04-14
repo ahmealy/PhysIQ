@@ -251,7 +251,13 @@ DOMAINS = {
         "label":         "Cylinder Flow (CFD)",
         "description":   "2D fluid flow past a cylinder — von Kármán vortex street",
         "data_dir":      "data",
-        "checkpoint":    "checkpoints/best_model.pth",
+        # Arch-specific filenames (best_model_{arch}.pth).  Fall back to the legacy
+        # best_model.pth so existing checkpoints keep working without retraining.
+        "checkpoint":    (
+            "checkpoints/best_model_gn.pth"
+            if os.path.exists("checkpoints/best_model_gn.pth")
+            else "checkpoints/best_model.pth"
+        ),
         "node_input":    11,
         "edge_input":    3,
         "mp_steps":      15,
@@ -263,7 +269,11 @@ DOMAINS = {
         "label":       "Flag Simple (Cloth)",
         "description": "3D cloth simulation — deformable mesh",
         "data_dir":    "data_flag",
-        "checkpoint":  "checkpoints/flag_best_model.pth",
+        "checkpoint":  (
+            "checkpoints/flag_best_model_gn.pth"
+            if os.path.exists("checkpoints/flag_best_model_gn.pth")
+            else "checkpoints/flag_best_model.pth"
+        ),
         "node_input":  12,
         "edge_input":  7,
         "mp_steps":    15,

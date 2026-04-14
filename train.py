@@ -293,9 +293,14 @@ if __name__ == '__main__':
 
     simulator.to(device)
 
-    # Resume from checkpoint if it exists — use domain-specific filename to
-    # avoid collisions between cylinder_flow and flag_simple checkpoints.
-    ckpt_filename = "flag_best_model.pth" if domain == "flag_simple" else "best_model.pth"
+    # Resume from checkpoint if it exists — use domain+arch-specific filename so
+    # training GN / TNS / SAGE never overwrites each other's checkpoints.
+    # Pattern: best_model_{arch}.pth  (e.g. best_model_gn.pth, best_model_tns.pth)
+    # Flag_simple uses: flag_best_model_{arch}.pth
+    if domain == "flag_simple":
+        ckpt_filename = f"flag_best_model_{architecture}.pth"
+    else:
+        ckpt_filename = f"best_model_{architecture}.pth"
     checkpoint_path = os.path.join(checkpoint_dir, ckpt_filename)
     start_epoch, best_valid_loss = load_checkpoint(checkpoint_path, simulator, optimizer, device)
     best_epoch = start_epoch - 1

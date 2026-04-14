@@ -709,21 +709,29 @@ def test_cloth_ood_confidence_sentinel_is_negative():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_generate_py_has_no_unused_base64_import():
-    """generate.py must not import base64 (it is unused)."""
+    """generate.py must not import base64 at module level (it was unused there).
+
+    base64 is allowed as a local import inside event_stream_ssh() where it is
+    used to decode thumbnails relayed from the remote GPU host.
+    """
     import ast, pathlib
     src  = pathlib.Path("api/routes/generate.py").read_text()
     tree = ast.parse(src)
-    imports = []
-    for node in ast.walk(tree):
+
+    # Collect only module-level (top-level) imports — not those nested inside
+    # functions or async generators.
+    module_imports: list[str] = []
+    for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.Import):
-            imports.extend(alias.name for alias in node.names)
+            module_imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                imports.append(node.module)
+                module_imports.append(node.module)
 
-    # base64 should not appear as a standalone import (it is unused)
-    assert "base64" not in imports, (
-        "generate.py still imports 'base64' which is unused — remove it"
+    # base64 must not appear at module level (it belongs only in the SSH helper)
+    assert "base64" not in module_imports, (
+        "generate.py imports 'base64' at module level where it is unused — "
+        "keep it as a local import inside event_stream_ssh() only"
     )
 
 

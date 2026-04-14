@@ -34,7 +34,7 @@ import io
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import numpy as np
 from fastapi import APIRouter, HTTPException
@@ -845,8 +845,13 @@ async def generate(req: GenerateRequest):
             yield _sse_event("error", {"detail": str(e)})
 
     async def event_stream_ssh() -> AsyncGenerator[str, None]:
-        """Relay named-SSE events from generate_ssh.py running on the remote GPU via SSH."""
-        import base64
+        """Relay named-SSE events from generate_ssh.py running on the remote GPU via SSH.
+
+        Uses shared NFS — thumbnails and graphs are saved to disk by generate_ssh.py
+        using the same session_id, so no base64 encoding or scp needed.
+        The Analyze button works because graphs are pickled to runs/graphs/{session_id}/.
+        """
+        import pickle
         import shlex
         import subprocess
 
@@ -857,6 +862,7 @@ async def generate(req: GenerateRequest):
         os.makedirs(os.path.join(project_root, "runs"), exist_ok=True)
         cfg_path = os.path.join(project_root, "runs", "ui_generate_config.json")
 
+        # Pass the session_id so the remote script uses the same NFS paths.
         with open(cfg_path, "w") as _f:
             json.dump({
                 "domain":       req.domain,
@@ -864,6 +870,7 @@ async def generate(req: GenerateRequest):
                 "n_candidates": req.n_candidates,
                 "method":       req.method,
                 "device":       "cuda:0",   # always GPU on remote
+                "session_id":   session_id,
             }, _f)
 
         remote_cfg  = _load_remote_cfg()
@@ -905,34 +912,27 @@ async def generate(req: GenerateRequest):
                     current_event = line[7:]    # extract event name
                     yield line + "\n"
                 elif line.startswith("data: "):
-                    # Candidate events: decode thumbnail_b64 → _thumbnail_cache
-                    if current_event == "candidate":
+                    # NFS path: generate_ssh.py writes thumbnail URLs and graph
+                    # files to disk directly using the shared filesystem.
+                    # We only need to load the graphs into the API's _graph_cache
+                    # once all candidates arrive (on "done"), so Analyze works.
+                    if current_event == "done":
+                        # Load graphs from disk into _graph_cache for Analyze.
                         try:
-                            payload = json.loads(line[6:])
-                            b64 = payload.pop("thumbnail_b64", None)
-                            if b64:
-                                png     = base64.b64decode(b64)
-                                cand_id = payload.get("id", 0)
-                                sid     = session_id   # captured from outer generate() scope
-                                if sid not in _thumbnail_cache:
-                                    _thumbnail_cache[sid] = {}
-                                _thumbnail_cache[sid][cand_id] = png
-                                payload["thumbnail_url"] = (
-                                    f"/api/generate/thumbnail/{sid}/{cand_id}"
-                                )
-                            else:
-                                payload["thumbnail_url"] = None
-                            payload["session_id"] = session_id
-                            line = "data: " + json.dumps(payload)
+                            graph_dir = os.path.join(
+                                project_root, "runs", "graphs", session_id
+                            )
+                            graph_cache: dict[int, Any] = {}
+                            if os.path.isdir(graph_dir):
+                                for fname in os.listdir(graph_dir):
+                                    if fname.startswith("graph_") and fname.endswith(".pkl"):
+                                        cid = int(fname[6:-4])
+                                        with open(os.path.join(graph_dir, fname), "rb") as gf:
+                                            graph_cache[cid] = pickle.load(gf)
+                            if graph_cache:
+                                _graph_cache[session_id] = graph_cache
                         except Exception:
-                            pass   # forward original line if decode fails
-                    elif current_event == "done":
-                        try:
-                            payload = json.loads(line[6:])
-                            payload["session_id"] = session_id
-                            line = "data: " + json.dumps(payload)
-                        except Exception:
-                            pass
+                            pass  # graph loading is best-effort; Analyze will just be disabled
                     yield line + "\n"
                     current_event = None   # reset after data line
                 elif not line:

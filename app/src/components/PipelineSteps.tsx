@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sliders, Wand2, Grid3X3, Cpu, ShieldCheck, ChevronRight } from 'lucide-react';
+import { Sliders, Wand2, Grid3X3, Zap, ShieldCheck, ChevronRight, Repeat2, Eye } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 
 // ── Step definitions ─────────────────────────────────────────────────────────
@@ -10,72 +10,80 @@ interface Step {
   description: string;
 }
 
+// CVAE sampling path
+// step indices: 0=Set target, 1=CVAE decode, 2=Surrogate predict, 3=OOD check
 const STEPS_SAMPLE: Step[] = [
   {
     icon:        <Sliders className="w-4 h-4" />,
     label:       'Set target',
-    description: 'You pick a physics goal (e.g. drag = 0.025)',
+    description: 'Pick a physics goal (e.g. drag = 0.025)',
   },
   {
     icon:        <Wand2 className="w-4 h-4" />,
-    label:       'Generate design',
-    description: 'AI samples candidate shape parameters that should hit the target',
+    label:       'CVAE decoder',
+    description: 'Conditioned variational auto-encoder maps target → design params (cx, cy, r, v)',
   },
   {
-    icon:        <Grid3X3 className="w-4 h-4" />,
-    label:       'Build mesh',
-    description: 'The shape is turned into a simulation-ready mesh',
-  },
-  {
-    icon:        <Cpu className="w-4 h-4" />,
-    label:       'Run simulation',
-    description: 'MeshGraphNets predicts the physics field (velocity / cloth motion)',
+    icon:        <Zap className="w-4 h-4" />,
+    label:       'Surrogate predict',
+    description: 'Lightweight MLP predicts drag/stress from params — ~1000× faster than a full GNN rollout',
   },
   {
     icon:        <ShieldCheck className="w-4 h-4" />,
-    label:       'Check reliability',
-    description: 'Each result is scored — flagged if the AI is uncertain',
+    label:       'OOD check',
+    description: 'Each candidate is scored against the training distribution — flagged if the AI is uncertain',
   },
 ];
 
+// Gradient descent path
+// step indices: 0=Set target, 1=Latent opt, 2=Surrogate loss, 3=Render, 4=OOD check
 const STEPS_GRADIENT: Step[] = [
   {
     icon:        <Sliders className="w-4 h-4" />,
     label:       'Set target',
-    description: 'You pick a physics goal',
+    description: 'Pick a physics goal',
   },
   {
     icon:        <Wand2 className="w-4 h-4" />,
-    label:       'Start from random',
-    description: 'AI picks a random starting design in latent space',
+    label:       'Latent optimisation',
+    description: 'Adam runs 150 steps × 3 restarts in the CVAE latent space, guided by surrogate gradients',
   },
   {
-    icon:        <Cpu className="w-4 h-4" />,
-    label:       'Run simulation',
-    description: 'Predict physics for this design',
+    icon:        <Zap className="w-4 h-4" />,
+    label:       'Surrogate gradient',
+    description: 'Differentiable MLP loss ∂drag/∂z flows back through the CVAE decoder — no GNN needed',
   },
   {
-    icon:        <Grid3X3 className="w-4 h-4" />,
-    label:       'Adjust design',
-    description: 'Tweak the design in the direction that reduces the error (gradient step)',
-  },
-  {
-    icon:        <ChevronRight className="w-4 h-4 text-violet-400" />,
-    label:       'Repeat × 100',
-    description: 'Keep improving until the design converges on your target',
+    icon:        <Repeat2 className="w-4 h-4" />,
+    label:       'Diversify',
+    description: 'N candidates sampled around z* (optimal point) with small noise to cover the solution space',
   },
   {
     icon:        <ShieldCheck className="w-4 h-4" />,
-    label:       'Check reliability',
-    description: 'Final design scored for confidence',
+    label:       'OOD check',
+    description: 'Final designs scored for confidence',
   },
 ];
+
+// Coupling note shown below both pipelines
+const COUPLING_NOTE = (
+  <div className="mt-4 flex items-start gap-2.5 rounded-lg bg-blue-950/30 border border-blue-500/20 px-3 py-2.5 text-[11px] text-blue-300/80">
+    <Eye className="w-3.5 h-3.5 mt-0.5 text-blue-400 shrink-0" />
+    <span>
+      <span className="font-semibold text-blue-300">Generate → Predict coupling:</span>
+      {' '}The surrogate gives a fast physics estimate during design search.
+      Click <span className="font-mono bg-blue-900/40 px-1 rounded">Analyze</span> on any
+      candidate to run a full <span className="font-semibold">MeshGraphNets GNN rollout</span> in
+      Predict — this is the physics-accurate simulation and produces the animated velocity / cloth field.
+    </span>
+  </div>
+);
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
 interface PipelineStepsProps {
-  method:    string;   // "sample" | "gradient"
-  activeStep?: number; // 0-based index of the currently running step (optional)
+  method:      string;   // "sample" | "gradient"
+  activeStep?: number;   // 0-based index of the currently running step (optional)
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -89,7 +97,7 @@ export const PipelineSteps: React.FC<PipelineStepsProps> = ({
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-5">
       <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-4">
-        How it works — {method === 'gradient' ? 'Gradient descent (iterative)' : 'AI sampling (instant)'}
+        How it works — {method === 'gradient' ? 'Gradient descent (iterative optimisation)' : 'CVAE sampling (instant)'}
       </p>
 
       {/* Horizontal strip on wide screens, vertical list on narrow */}
@@ -149,6 +157,9 @@ export const PipelineSteps: React.FC<PipelineStepsProps> = ({
           );
         })}
       </div>
+
+      {/* Generate → Predict coupling note */}
+      {COUPLING_NOTE}
     </div>
   );
 };

@@ -102,6 +102,8 @@ def _run(cfg: dict) -> None:
     sampler = _DOMAIN_SAMPLERS[domain]()
 
     # Run sampling (CVAE + surrogate / gradient descent).
+    phase_label = "Optimising in latent space…" if method == "gradient" else "Sampling from CVAE…"
+    _sse("progress", {"phase": phase_label, "step": 1, "done": 0, "total": n_candidates})
     results, trajectory = sampler.sample(target_value, n_candidates, device, method)
     # results: list[tuple[CandidateResult, graph_or_None]]
 
@@ -131,8 +133,15 @@ def _run(cfg: dict) -> None:
     # Stream candidates with rendered thumbnails.
     best_id  = 0
     best_err = float("inf")
+    n_total  = len(results)
 
-    for c, graph in results:
+    for i, (c, graph) in enumerate(results):
+        _sse("progress", {
+            "phase": "Rendering meshes…",
+            "step":  3,
+            "done":  i,
+            "total": n_total,
+        })
         # Save graph to disk for Analyze ──────────────────────────────────────
         if graph_dir and graph is not None:
             try:

@@ -299,16 +299,17 @@ class CFDDesignSampler(BaseDesignSampler):
         model.eval()
         surrogate.eval()
 
-        # Move GNN to target device (it was initialised on 'cpu' in __init__)
-        _use_gnn = (
-            self._simulator is not None
-            and self._mesh_lookup is not None
-            and self._mesh_lookup.available
-            and self._dataset is not None
-        )
-        if _use_gnn:
-            self._simulator.to(device)
-            self._simulator.eval()
+        # The GNN drag proxy (mean|vx| at OUTFLOW, units: m/s, typical 0.8–1.5)
+        # lives in a completely different unit/scale from the surrogate drag proxy
+        # (r·v_inlet²/(1-2r/H), units: m³/s², typical 0.01–0.15) and from the
+        # physical drag coefficient Cd the user specifies.  Comparing either
+        # against target_s directly via MSE drives the optimizer in the wrong
+        # direction.  Additionally, cx/cy/r have zero gradient through the
+        # discrete mesh lookup, so the GNN path only guides v_inlet anyway.
+        # The surrogate normalises all four inputs and outputs to [0,1] and
+        # back, giving the optimizer a well-scaled, fully differentiable signal.
+        # → always use the surrogate path for gradient descent.
+        _use_gnn = False
 
         drag_norm = float(
             (target - sc_cvae.drag_min) / (sc_cvae.drag_max - sc_cvae.drag_min + 1e-8)
@@ -779,7 +780,20 @@ async def generate(req: GenerateRequest):
         try:
             sampler = _DOMAIN_SAMPLERS[req.domain]()
 
-            # ── Sample candidates (CVAE + surrogate) ─────────────────────────
+            # ── Phase 1: CVAE sampling / gradient optimisation ────────────────
+            phase_label = (
+                "Optimising in latent space…"
+                if req.method == "gradient"
+                else "Sampling from CVAE…"
+            )
+            yield _sse_event("progress", {
+                "phase":   phase_label,
+                "step":    1,            # "Generate design" step index
+                "done":    0,
+                "total":   req.n_candidates,
+            })
+            await asyncio.sleep(0)
+
             # Run in thread pool to avoid blocking the event loop.
             loop = asyncio.get_running_loop()
             results, trajectory = await loop.run_in_executor(
@@ -795,47 +809,57 @@ async def generate(req: GenerateRequest):
                 yield _sse_event("trajectory", {"values": trajectory})
                 await asyncio.sleep(0)
 
-            # ── Render thumbnails + stream candidates ─────────────────────────
-            session_thumbs: dict[int, bytes] = {}
-            thumbnail_urls: dict[int, str | None] = {}
+            # ── Phase 2: render thumbnails and stream candidates one by one ───
+            # We cache graphs up-front (needed by the rollout endpoint), but
+            # render thumbnails and stream each candidate as soon as it's ready
+            # so the UI shows progress instead of waiting for the full batch.
+            _graph_cache[session_id] = {}
+            for c, graph in results:
+                if graph is not None:
+                    graph.domain = c.domain
+                    _graph_cache[session_id][c.id] = graph
+
             best_id  = 0
             best_err = float("inf")
 
-            for c, graph in results:
+            for i, (c, graph) in enumerate(results):
+                yield _sse_event("progress", {
+                    "phase": "Rendering meshes…",
+                    "step":  3,          # "Check reliability" / final step index
+                    "done":  i,
+                    "total": len(results),
+                })
+                await asyncio.sleep(0)
+
+                # Render thumbnail
+                png: bytes | None = None
                 try:
                     if req.domain == "cylinder_flow":
-                        if graph is None:
-                            thumbnail_urls[c.id] = None
-                            continue
-                        p = c.params
-                        png = ThumbnailRenderer.render_cfd(
-                            graph,
-                            cx=p.get("cx"), cy=p.get("cy"), r=p.get("r"),
-                        )
+                        if graph is not None:
+                            p   = c.params
+                            png = ThumbnailRenderer.render_cfd(
+                                graph,
+                                cx=p.get("cx"), cy=p.get("cy"), r=p.get("r"),
+                            )
                     else:
-                        png = ThumbnailRenderer.render_cloth(graph)
-                    session_thumbs[c.id] = png
-                    thumbnail_urls[c.id] = f"/api/generate/thumbnail/{session_id}/{c.id}"
+                        if graph is not None:
+                            png = ThumbnailRenderer.render_cloth(graph)
                 except Exception:
-                    thumbnail_urls[c.id] = None
+                    png = None
+
+                if png is not None:
+                    _cache_session(session_id, {c.id: png})
+                    thumbnail_url: str | None = f"/api/generate/thumbnail/{session_id}/{c.id}"
+                else:
+                    thumbnail_url = None
 
                 err = abs(c.predicted_value - c.target_value)
                 if err < best_err:
                     best_err = err
                     best_id  = c.id
 
-            # Cache all thumbnails before streaming so every URL is live when
-            # the browser receives the first candidate event.
-            _cache_session(session_id, session_thumbs)
-            # Also cache graphs for the rollout endpoint.
-            # Tag each graph with its domain so the rollout endpoint can branch correctly.
-            for c, graph in results:
-                graph.domain = c.domain
-            _graph_cache[session_id] = {c.id: graph for c, graph in results}
-
-            for c, _ in results:
                 payload                  = asdict(c)
-                payload["thumbnail_url"] = thumbnail_urls[c.id]
+                payload["thumbnail_url"] = thumbnail_url
                 payload["session_id"]    = session_id
                 yield _sse_event("candidate", payload)
                 await asyncio.sleep(0)

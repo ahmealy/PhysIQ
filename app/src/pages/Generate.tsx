@@ -97,6 +97,9 @@ export const Generate: React.FC = () => {
   const [optTrajectory, setOptTrajectory] = useState<number[]>(() =>
     loadLS<number[]>(LS_TRAJECTORY, [])
   );
+  const [genPhase, setGenPhase]           = useState<string | null>(null);
+  const [genDone, setGenDone]             = useState(0);
+  const [genActiveStep, setGenActiveStep] = useState<number | undefined>(undefined);
 
   const abortRef = useRef<AbortController | null>(null);
   const navigate = useNavigate();
@@ -153,6 +156,9 @@ export const Generate: React.FC = () => {
     setError(null);
     setWarningMessage(null);
     setOptTrajectory([]);
+    setGenPhase(null);
+    setGenDone(0);
+    setGenActiveStep(undefined);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -189,12 +195,18 @@ export const Generate: React.FC = () => {
           if (!dataLine) continue;
           try {
             const payload = JSON.parse(dataLine);
-            if (eventLine === 'candidate') {
+            if (eventLine === 'progress') {
+              setGenPhase((payload as any).phase ?? null);
+              setGenDone((payload as any).done ?? 0);
+              setGenActiveStep((payload as any).step ?? undefined);
+            } else if (eventLine === 'candidate') {
               setCandidates(prev => [...prev, payload as Candidate]);
             } else if (eventLine === 'trajectory') {
               setOptTrajectory(payload.values ?? []);
             } else if (eventLine === 'done') {
               setBestId(payload.best_id ?? null);
+              setGenPhase(null);
+              setGenActiveStep(undefined);
             } else if (eventLine === 'error') {
               setError(payload.detail ?? 'Unknown error');
             } else if (eventLine === 'warning') {
@@ -377,14 +389,19 @@ export const Generate: React.FC = () => {
           {isGenerating && (
             <div className="flex items-center gap-2 text-sm text-violet-400">
               <div className="w-2 h-2 bg-violet-400 rounded-full animate-pulse" />
-              <>Generating {candidates.length} / {config.n_candidates} candidates…</>
+              {genPhase
+                ? genPhase.includes('Rendering')
+                  ? <>{genPhase} {genDone + 1} / {config.n_candidates}</>
+                  : <>{genPhase}</>
+                : <>Generating candidates…</>
+              }
             </div>
           )}
         </div>
       </div>
 
       {/* Pipeline steps strip */}
-      <PipelineSteps method={config.method} />
+      <PipelineSteps method={config.method} activeStep={genActiveStep} />
 
       {/* Error */}
       {error && (

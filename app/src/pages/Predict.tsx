@@ -460,7 +460,7 @@ export const Predict: React.FC = () => {
                         : `cuda:0${gpuLabel ? ` (${gpuLabel})` : ''}`}
                     </option>
                   )}
-                  <option value="cpu">cpu</option>
+                  <option value="cpu">{remoteConfig ? `cpu (remote: ${remoteConfig.host})` : 'cpu'}</option>
                 </select>
                 {!statusLoaded && (
                   <p className="text-[10px] text-slate-500">Detecting GPU…</p>

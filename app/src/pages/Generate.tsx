@@ -326,7 +326,7 @@ export const Generate: React.FC = () => {
               onChange={e => setConfig(c => ({ ...c, device: e.target.value }))}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
             >
-              <option value="cpu">CPU (local)</option>
+              <option value="cpu">{remoteGpuHost ? `CPU (remote: ${remoteGpuHost})` : 'CPU'}</option>
               {gpuAvailable && (
                 <option value="cuda:0">
                   {remoteGpuHost ? `cuda:0 (remote: ${remoteGpuHost})` : 'cuda:0 (local GPU)'}

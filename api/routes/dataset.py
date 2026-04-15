@@ -135,7 +135,7 @@ def _mesh_quality_stats(pos: np.ndarray, cells: np.ndarray) -> dict:
     }
 
 
-
+def _compute_samples(npz_path: str, dat_path: str) -> dict:
     """CPU/IO-heavy computation for CFD domain — always called via run_in_executor."""
     meta = _load_meta(npz_path)
     indices = meta["indices"]

@@ -72,7 +72,70 @@ def dataset_info(domain: str = "cylinder_flow", split: str = "train"):
         }
 
 
-def _compute_samples(npz_path: str, dat_path: str) -> dict:
+def _mesh_quality_stats(pos: np.ndarray, cells: np.ndarray) -> dict:
+    """
+    Compute triangle mesh quality metrics from node positions and connectivity.
+
+    Args:
+        pos:   [N, 2] or [N, 3] float32 — node coordinates
+        cells: [F, 3] int32 — triangle face indices (local, 0-based)
+
+    Returns dict with:
+        aspect_ratio_mean, aspect_ratio_p95, aspect_ratio_max — edge length ratio stats
+        n_degenerate  — triangles with zero or near-zero area (area < 1e-12)
+        n_faces       — total face count
+        quality_ok    — True if p95 aspect ratio < 10 and no degenerate elements
+    """
+    v0 = pos[cells[:, 0]]   # [F, 2or3]
+    v1 = pos[cells[:, 1]]
+    v2 = pos[cells[:, 2]]
+
+    # Edge lengths
+    e0 = np.linalg.norm(v1 - v0, axis=-1)   # [F]
+    e1 = np.linalg.norm(v2 - v1, axis=-1)
+    e2 = np.linalg.norm(v0 - v2, axis=-1)
+
+    edges = np.stack([e0, e1, e2], axis=1)   # [F, 3]
+    max_e = edges.max(axis=1)
+    min_e = edges.min(axis=1)
+
+    # Aspect ratio = longest / shortest edge (≥ 1 always; equilateral = 1)
+    aspect = max_e / np.maximum(min_e, 1e-12)
+
+    # Degenerate triangles: area ≈ 0
+    # Use cross product magnitude for area (works for both 2D and 3D)
+    if pos.shape[1] == 2:
+        # 2D: signed area via 2D cross product
+        cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) \
+              - (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+        area = np.abs(cross) * 0.5
+    else:
+        # 3D: area = 0.5 * ||(v1-v0) × (v2-v0)||
+        d1 = v1 - v0
+        d2 = v2 - v0
+        cross3 = np.cross(d1, d2)
+        area = np.linalg.norm(cross3, axis=-1) * 0.5
+
+    n_degenerate = int(np.sum(area < 1e-12))
+    n_faces = len(cells)
+
+    ar_mean = float(np.mean(aspect))
+    ar_p95  = float(np.percentile(aspect, 95))
+    ar_max  = float(np.max(aspect))
+
+    quality_ok = (ar_p95 < 10.0) and (n_degenerate == 0)
+
+    return {
+        "aspect_ratio_mean": round(ar_mean, 2),
+        "aspect_ratio_p95":  round(ar_p95,  2),
+        "aspect_ratio_max":  round(ar_max,  2),
+        "n_degenerate":      n_degenerate,
+        "n_faces":           n_faces,
+        "quality_ok":        quality_ok,
+    }
+
+
+
     """CPU/IO-heavy computation for CFD domain — always called via run_in_executor."""
     meta = _load_meta(npz_path)
     indices = meta["indices"]
@@ -136,6 +199,18 @@ def _compute_samples(npz_path: str, dat_path: str) -> dict:
     except Exception:
         node_type_counts = {}
 
+    # Mesh quality — sample first trajectory
+    mesh_quality: dict = {}
+    try:
+        if "pos" in meta and "cells" in meta and "cindices" in meta:
+            c_start = int(meta["cindices"][0])
+            c_end   = int(meta["cindices"][1])
+            pos0    = meta["pos"][int(meta["indices"][0]):int(meta["indices"][1])].astype(np.float32)
+            cells0  = meta["cells"][c_start:c_end].astype(np.int32)
+            mesh_quality = _mesh_quality_stats(pos0, cells0)
+    except Exception:
+        pass
+
     return {
         "velocity_bins":    velocity_bins,
         "energy_bins":      energy_bins,
@@ -145,6 +220,7 @@ def _compute_samples(npz_path: str, dat_path: str) -> dict:
         "total_nodes":      int(node_counts.sum()),
         "mean_nodes":       round(float(node_counts.mean()), 1),
         "node_type_counts": node_type_counts,
+        "mesh_quality":     mesh_quality,
     }
 
 
@@ -223,6 +299,7 @@ def _compute_samples_flag(data_dir: str, split: str) -> dict:
 
     # Node type breakdown — load from first available trajectory
     node_type_counts = {}
+    mesh_quality: dict = {}
     try:
         first_path = os.path.join(split_dir, "traj_00000.npz")
         if os.path.exists(first_path):
@@ -232,6 +309,11 @@ def _compute_samples_flag(data_dir: str, split: str) -> dict:
                 c = int(np.sum(nt == val))
                 if c > 0:
                     node_type_counts[name] = c
+            # Mesh quality on world_pos at t=0 (3D cloth shape)
+            if "world_pos" in traj0 and "cells" in traj0:
+                pos3d  = traj0["world_pos"][0].astype(np.float32)   # [N, 3]
+                cells0 = traj0["cells"].astype(np.int32)             # [F, 3]
+                mesh_quality = _mesh_quality_stats(pos3d, cells0)
     except Exception:
         pass
 
@@ -244,6 +326,7 @@ def _compute_samples_flag(data_dir: str, split: str) -> dict:
         "total_nodes":      int(valid_nc.sum()) if len(valid_nc) else 0,
         "mean_nodes":       round(float(valid_nc.mean()), 1) if len(valid_nc) else 0,
         "node_type_counts": node_type_counts,
+        "mesh_quality":     mesh_quality,
     }
 
 

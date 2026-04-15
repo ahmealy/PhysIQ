@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Database, Info, AlertTriangle, CheckCircle2, BarChart2, Loader2, Flag, Layers, Clock, Hash } from 'lucide-react';
+import { Database, Info, AlertTriangle, CheckCircle2, BarChart2, Loader2, Flag, Layers, Clock, Hash, Triangle } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { MeshPlot } from '../components/MeshPlot';
 
@@ -391,6 +391,69 @@ export const DatasetStudio: React.FC = () => {
               )}
             </section>
           </div>
+
+          {/* Mesh Quality */}
+          {data.mesh_quality && Object.keys(data.mesh_quality).length > 0 && (() => {
+            const mq = data.mesh_quality as {
+              aspect_ratio_mean: number;
+              aspect_ratio_p95: number;
+              aspect_ratio_max: number;
+              n_degenerate: number;
+              n_faces: number;
+              quality_ok: boolean;
+            };
+            const arGood  = mq.aspect_ratio_p95 < 10.0;
+            const degGood = mq.n_degenerate === 0;
+            const verdictColor = mq.quality_ok ? 'text-green-400' : 'text-amber-400';
+            const verdictBg    = mq.quality_ok
+              ? 'bg-green-500/10 border-green-500/20'
+              : 'bg-amber-500/10 border-amber-500/20';
+            return (
+              <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
+                    <Triangle className="w-4 h-4 text-orange-400" />
+                    Mesh Quality
+                  </h3>
+                  <span className={cn('px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border', verdictBg, verdictColor)}>
+                    {mq.quality_ok ? '✓ Good' : '⚠ Attention needed'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {/* Aspect ratio mean */}
+                  <div className="bg-slate-800/50 rounded-xl px-4 py-3 space-y-0.5">
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">Avg shape ratio</p>
+                    <p className="text-lg font-bold font-mono text-white">{mq.aspect_ratio_mean.toFixed(2)}</p>
+                    <p className="text-[10px] text-slate-500">longest / shortest edge</p>
+                  </div>
+                  {/* Aspect ratio p95 */}
+                  <div className={cn('rounded-xl px-4 py-3 space-y-0.5', arGood ? 'bg-slate-800/50' : 'bg-amber-900/20 border border-amber-700/30')}>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">95th-pct ratio</p>
+                    <p className={cn('text-lg font-bold font-mono', arGood ? 'text-white' : 'text-amber-300')}>{mq.aspect_ratio_p95.toFixed(2)}</p>
+                    <p className="text-[10px] text-slate-500">{arGood ? '< 10 — acceptable' : '≥ 10 — very skewed'}</p>
+                  </div>
+                  {/* Max aspect ratio */}
+                  <div className="bg-slate-800/50 rounded-xl px-4 py-3 space-y-0.5">
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">Worst ratio</p>
+                    <p className="text-lg font-bold font-mono text-white">{mq.aspect_ratio_max.toFixed(1)}</p>
+                    <p className="text-[10px] text-slate-500">single worst triangle</p>
+                  </div>
+                  {/* Degenerate count */}
+                  <div className={cn('rounded-xl px-4 py-3 space-y-0.5', degGood ? 'bg-slate-800/50' : 'bg-red-900/20 border border-red-700/30')}>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">Degenerate faces</p>
+                    <p className={cn('text-lg font-bold font-mono', degGood ? 'text-green-400' : 'text-red-400')}>{mq.n_degenerate}</p>
+                    <p className="text-[10px] text-slate-500">area &lt; 1e-12 m²</p>
+                  </div>
+                </div>
+
+                <p className="text-[10px] text-slate-600 italic">
+                  Sampled from trajectory 0 ({mq.n_faces.toLocaleString()} triangular faces).
+                  Aspect ratio = longest ÷ shortest edge per triangle — perfect equilateral = 1.0, ratio ≥ 10 indicates highly skewed elements.
+                </p>
+              </section>
+            );
+          })()}
 
           {/* Outlier table */}
           <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">

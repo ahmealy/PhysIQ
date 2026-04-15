@@ -236,7 +236,9 @@ class DragSurrogate(BaseSurrogate):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)   # [B]
+        # clamp output ≥ 0 — drag is always non-negative; raw linear head can
+        # extrapolate to slightly negative values at low r*v² combinations
+        return self.net(x).squeeze(-1).clamp(min=0.0)   # [B]
 
     def predict(self, params: torch.Tensor) -> torch.Tensor:
         self.eval()

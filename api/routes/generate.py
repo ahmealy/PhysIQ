@@ -467,8 +467,11 @@ class CFDDesignSampler(BaseDesignSampler):
                 best_z    = z.detach().clone()
                 best_traj = traj
 
-        # Sample n diverse candidates around optimal z
-        noise_scale = 0.25
+        # Sample n diverse candidates around optimal z.
+        # noise_scale=0.10: at latent_dim=16, E[||noise||] = 0.10*sqrt(16)=0.40
+        # which is a modest perturbation — keeps candidates close enough to
+        # the optimum while still diversifying within the training distribution.
+        noise_scale = 0.10
         results     = []
         with torch.no_grad():
             for _ in range(n):
@@ -487,7 +490,7 @@ class ClothDesignSampler(BaseDesignSampler):
     """Samples flag_simple designs using the Cloth CVAE."""
 
     CVAE_PATH      = "checkpoints/flag-simple_cvae.pth"
-    PCA_PATH       = "data_flag/train/cloth_pca.pkl"
+    PCA_PATH       = "data_flag/train/cloth_pca.npz"
     STRESS_PATH    = "data_flag/train/cloth_stress.npy"
     REF_TRAJ       = "data_flag/train/traj_00000.npz"
 
@@ -968,14 +971,25 @@ async def generate(req: GenerateRequest):
 
 @router.get("/generate/thumbnail/{session_id}/{candidate_id}")
 async def get_thumbnail(session_id: str, candidate_id: int):
-    """Return a PNG thumbnail for a generated candidate."""
+    """Return a PNG thumbnail for a generated candidate.
+
+    Checks the in-memory cache first (local generation), then falls back to
+    the NFS disk path written by generate_ssh.py (SSH generation).
+    """
     session = _thumbnail_cache.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    png = session.get(candidate_id)
-    if png is None:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    return Response(content=png, media_type="image/png")
+    if session is not None:
+        png = session.get(candidate_id)
+        if png is not None:
+            return Response(content=png, media_type="image/png")
+
+    # NFS fallback — SSH path writes PNGs to runs/thumbnails/{session_id}/cand_{id}.png
+    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    nfs_path = os.path.join(_project_root, "runs", "thumbnails", session_id, f"cand_{candidate_id}.png")
+    if os.path.exists(nfs_path):
+        with open(nfs_path, "rb") as f:
+            return Response(content=f.read(), media_type="image/png")
+
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
 # ---------------------------------------------------------------------------

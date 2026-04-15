@@ -401,7 +401,7 @@ export const Generate: React.FC = () => {
       </div>
 
       {/* Pipeline steps strip */}
-      <PipelineSteps method={config.method} activeStep={genActiveStep} />
+      <PipelineSteps domain={config.domain} method={config.method} activeStep={genActiveStep} />
 
       {/* Error */}
       {error && (

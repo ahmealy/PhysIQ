@@ -408,6 +408,34 @@ export const DatasetStudio: React.FC = () => {
             const verdictBg    = mq.quality_ok
               ? 'bg-green-500/10 border-green-500/20'
               : 'bg-amber-500/10 border-amber-500/20';
+
+            // Reusable tooltip tile
+            const MqTile = ({
+              label, value, sub, bgCls, valueCls, tip,
+            }: {
+              label: string; value: string; sub: string;
+              bgCls?: string; valueCls?: string; tip: string;
+            }) => (
+              <div className={cn('relative group rounded-xl px-4 py-3 space-y-0.5', bgCls ?? 'bg-slate-800/50')}>
+                {/* label row with info icon */}
+                <div className="flex items-center gap-1">
+                  <p className="text-[10px] text-slate-500 font-bold uppercase leading-none">{label}</p>
+                  <span className="text-slate-600 cursor-default select-none text-[10px] leading-none">ⓘ</span>
+                </div>
+                <p className={cn('text-lg font-bold font-mono', valueCls ?? 'text-white')}>{value}</p>
+                <p className="text-[10px] text-slate-500">{sub}</p>
+                {/* Tooltip — appears above on hover */}
+                <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-20
+                                w-56 rounded-lg bg-slate-800 border border-slate-700 shadow-xl
+                                px-3 py-2.5 text-[10px] text-slate-300 leading-relaxed
+                                opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                  {tip}
+                  {/* Arrow */}
+                  <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700" />
+                </div>
+              </div>
+            );
+
             return (
               <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
                 <div className="flex items-center justify-between">
@@ -421,35 +449,38 @@ export const DatasetStudio: React.FC = () => {
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {/* Aspect ratio mean */}
-                  <div className="bg-slate-800/50 rounded-xl px-4 py-3 space-y-0.5">
-                    <p className="text-[10px] text-slate-500 font-bold uppercase">Avg shape ratio</p>
-                    <p className="text-lg font-bold font-mono text-white">{mq.aspect_ratio_mean.toFixed(2)}</p>
-                    <p className="text-[10px] text-slate-500">longest / shortest edge</p>
-                  </div>
-                  {/* Aspect ratio p95 */}
-                  <div className={cn('rounded-xl px-4 py-3 space-y-0.5', arGood ? 'bg-slate-800/50' : 'bg-amber-900/20 border border-amber-700/30')}>
-                    <p className="text-[10px] text-slate-500 font-bold uppercase">95th-pct ratio</p>
-                    <p className={cn('text-lg font-bold font-mono', arGood ? 'text-white' : 'text-amber-300')}>{mq.aspect_ratio_p95.toFixed(2)}</p>
-                    <p className="text-[10px] text-slate-500">{arGood ? '< 10 — acceptable' : '≥ 10 — very skewed'}</p>
-                  </div>
-                  {/* Max aspect ratio */}
-                  <div className="bg-slate-800/50 rounded-xl px-4 py-3 space-y-0.5">
-                    <p className="text-[10px] text-slate-500 font-bold uppercase">Worst ratio</p>
-                    <p className="text-lg font-bold font-mono text-white">{mq.aspect_ratio_max.toFixed(1)}</p>
-                    <p className="text-[10px] text-slate-500">single worst triangle</p>
-                  </div>
-                  {/* Degenerate count */}
-                  <div className={cn('rounded-xl px-4 py-3 space-y-0.5', degGood ? 'bg-slate-800/50' : 'bg-red-900/20 border border-red-700/30')}>
-                    <p className="text-[10px] text-slate-500 font-bold uppercase">Degenerate faces</p>
-                    <p className={cn('text-lg font-bold font-mono', degGood ? 'text-green-400' : 'text-red-400')}>{mq.n_degenerate}</p>
-                    <p className="text-[10px] text-slate-500">area &lt; 1e-12 m²</p>
-                  </div>
+                  <MqTile
+                    label="Avg shape ratio"
+                    value={mq.aspect_ratio_mean.toFixed(2)}
+                    sub="longest / shortest edge"
+                    tip="Average of (longest ÷ shortest edge) across all triangles. A perfect equilateral triangle scores 1.0. Values of 1–3 are normal for well-structured CFD/cloth meshes."
+                  />
+                  <MqTile
+                    label="95th-pct ratio"
+                    value={mq.aspect_ratio_p95.toFixed(2)}
+                    sub={arGood ? '< 10 — acceptable' : '≥ 10 — very skewed'}
+                    bgCls={arGood ? undefined : 'bg-amber-900/20 border border-amber-700/30'}
+                    valueCls={arGood ? 'text-white' : 'text-amber-300'}
+                    tip="95% of triangles have a shape ratio below this value. Threshold is 10 — above that, highly skewed elements cause numerical diffusion in GNN message passing and can degrade prediction accuracy."
+                  />
+                  <MqTile
+                    label="Worst ratio"
+                    value={mq.aspect_ratio_max.toFixed(1)}
+                    sub="single worst triangle"
+                    tip="The single most-elongated triangle in the mesh. A very high value here (e.g. > 50) is acceptable as long as the 95th-percentile ratio is under 10 — boundary layers often produce a few extreme slivers."
+                  />
+                  <MqTile
+                    label="Degenerate faces"
+                    value={String(mq.n_degenerate)}
+                    sub="area < 1e-12 m²"
+                    bgCls={degGood ? undefined : 'bg-red-900/20 border border-red-700/30'}
+                    valueCls={degGood ? 'text-green-400' : 'text-red-400'}
+                    tip="Triangles with near-zero area (< 1e-12 m²). These are collapsed or coincident nodes. Even one degenerate face can produce NaN edge features in the GNN encoder and cause training instability."
+                  />
                 </div>
 
                 <p className="text-[10px] text-slate-600 italic">
-                  Sampled from trajectory 0 ({mq.n_faces.toLocaleString()} triangular faces).
-                  Aspect ratio = longest ÷ shortest edge per triangle — perfect equilateral = 1.0, ratio ≥ 10 indicates highly skewed elements.
+                  Sampled from trajectory 0 ({mq.n_faces.toLocaleString()} triangular faces). Hover the ⓘ on each metric for details.
                 </p>
               </section>
             );

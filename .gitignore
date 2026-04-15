@@ -30,6 +30,8 @@ OVERVIEW.md
 docs/*
 !docs/superpowers/
 !docs/superpowers/**
+!docs/demo/
+!docs/demo/**
 
 # Dataset metadata
 meta.json

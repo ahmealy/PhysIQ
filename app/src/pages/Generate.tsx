@@ -327,19 +327,23 @@ export const Generate: React.FC = () => {
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
             >
               <option value="cpu">CPU (local)</option>
-              {gpuAvailable && <option value="cuda:0">GPU (cuda:0)</option>}
+              {gpuAvailable && (
+                <option value="cuda:0">
+                  {remoteGpuHost ? `cuda:0 (remote: ${remoteGpuHost})` : 'cuda:0 (local GPU)'}
+                </option>
+              )}
             </select>
           </div>
 
         </div>
 
-        {/* Remote GPU note — Generate runs locally, unlike Predict which SSHes */}
+        {/* Remote GPU banner — Generate dispatches via SSH when remote GPU is configured */}
         {remoteGpuHost && (
-          <div className="flex items-center gap-2 p-3 bg-amber-600/10 border border-amber-500/20 rounded-lg text-xs">
-            <Server className="w-4 h-4 text-amber-400 shrink-0" />
+          <div className="flex items-center gap-2 p-3 bg-emerald-600/10 border border-emerald-500/20 rounded-lg text-xs">
+            <Server className="w-4 h-4 text-emerald-400 shrink-0" />
             <div>
-              <span className="text-amber-300 font-bold">Remote GPU detected ({remoteGpuHost})</span>
-              <span className="text-amber-400/70 ml-2">— Generate runs locally (no SSH dispatch yet). Select CPU unless your local machine has CUDA.</span>
+              <span className="text-emerald-300 font-bold">Remote GPU active ({remoteGpuHost})</span>
+              <span className="text-emerald-400/70 ml-2">— Generate will run on the remote GPU via SSH.</span>
             </div>
           </div>
         )}

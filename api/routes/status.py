@@ -31,12 +31,19 @@ def _checkpoint_info_sync(path: str) -> Optional[dict]:
     mtime = stat.st_mtime
     if path in _checkpoint_cache and _checkpoint_cache[path]["mtime"] == mtime:
         return _checkpoint_cache[path]["info"]
+    import math
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     # Count trainable parameters from state dict
     param_count = sum(v.numel() for v in ckpt.get("model_state_dict", {}).values())
+    raw_vloss = ckpt.get("valid_loss")
+    vloss_safe = (
+        round(float(raw_vloss), 6)
+        if raw_vloss is not None and math.isfinite(float(raw_vloss))
+        else None
+    )
     info = {
         "epoch":        ckpt.get("epoch"),
-        "valid_loss":   ckpt.get("valid_loss"),
+        "valid_loss":   vloss_safe,
         "size_mb":      round(stat.st_size / 1e6, 2),
         "param_count":  param_count,
         "param_count_m": round(param_count / 1e6, 2),

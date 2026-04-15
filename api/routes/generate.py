@@ -1037,10 +1037,32 @@ async def generate_rollout(session_id: str, candidate_id: int,
     import logging
 
     session_graphs = _graph_cache.get(session_id)
-    if session_graphs is None:
+    graph = session_graphs.get(candidate_id) if session_graphs is not None else None
+
+    # SSH/NFS fallback — generate_ssh.py saves graphs to disk under runs/graphs/
+    if graph is None:
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        nfs_graph_path = os.path.join(
+            _project_root, "runs", "graphs", session_id, f"graph_{candidate_id}.pkl"
+        )
+        if os.path.exists(nfs_graph_path):
+            try:
+                with open(nfs_graph_path, "rb") as _gf:
+                    graph = pickle.load(_gf)
+                # Populate in-memory cache so subsequent requests are fast
+                if session_graphs is None:
+                    _graph_cache[session_id] = {}
+                _graph_cache[session_id][candidate_id] = graph
+            except Exception as _e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to load graph from NFS cache: {_e}"
+                )
+
+    if session_graphs is None and graph is None:
         raise HTTPException(status_code=404,
                             detail="Session not found — regenerate candidates first.")
-    graph = session_graphs.get(candidate_id)
     if graph is None:
         raise HTTPException(status_code=404, detail="Candidate not found in session.")
 

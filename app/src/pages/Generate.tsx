@@ -242,7 +242,7 @@ export const Generate: React.FC = () => {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">
-            MeshGraph Generate
+            PhysIQ Generate
           </h1>
           <p className="text-sm text-slate-400 mt-0.5">
             Generate novel mesh designs conditioned on physics targets

@@ -42,9 +42,9 @@ export const Sidebar: React.FC = () => {
       <div className="p-6">
         <div className="flex items-center gap-3 mb-8">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/20">
-            <Database className="text-white w-5 h-5" />
+            <span className="text-white text-[11px] font-black tracking-tight leading-none">IQ</span>
           </div>
-          <h1 className="text-lg font-bold text-white tracking-tight">MeshGraphNets</h1>
+          <h1 className="text-lg font-bold text-white tracking-tight">Phys<span className="text-blue-400">IQ</span></h1>
         </div>
 
         <nav className="space-y-1">

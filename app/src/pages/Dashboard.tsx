@@ -56,7 +56,7 @@ export const Dashboard: React.FC = () => {
       <header className="flex justify-between items-end">
         <div>
           <h2 className="text-3xl font-bold text-white tracking-tight">System Overview</h2>
-          <p className="text-slate-400 mt-2">MeshGraph Generate — Engine Status</p>
+          <p className="text-slate-400 mt-2">PhysIQ — Engine Status</p>
         </div>
         <div className="flex gap-4">
           <div className="px-4 py-2 bg-slate-900 border border-slate-800 rounded-lg flex items-center gap-2">

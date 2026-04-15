@@ -325,7 +325,7 @@ export const Train: React.FC = () => {
       <header className="flex justify-between items-end">
         <div>
           <h2 className="text-3xl font-bold text-white tracking-tight">Model Training</h2>
-          <p className="text-slate-400 mt-2">Configure and monitor MeshGraphNets training</p>
+          <p className="text-slate-400 mt-2">Configure and monitor PhysIQ training</p>
         </div>
         <div className="flex gap-3">
           {!statusLoaded ? (

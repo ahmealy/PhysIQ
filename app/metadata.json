@@ -1,5 +1,5 @@
 {
-  "name": "MeshGraph Generate",
-  "description": "AI-accelerated physics simulation using Graph Neural Networks for engineering meshes.",
+  "name": "PhysIQ",
+  "description": "AI-accelerated physics simulation and inverse design using Graph Neural Networks for engineering meshes.",
   "requestFramePermissions": []
 }

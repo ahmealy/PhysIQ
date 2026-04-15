@@ -1,176 +1,134 @@
-# 🌊 Learning Mesh-Based Simulation with Graph Networks  
-### *Fast, Adaptive, and Physics-Informed Neural Simulators for Complex Fluid Dynamics*
+# PhysIQ
 
-This repository provides a **PyTorch + PyG (PyTorch Geometric)** implementation of **MeshGraphNets**—a powerful graph neural network framework for learning mesh-based physical simulations. We focus on the **flow around a circular cylinder** problem, reproducing and extending the groundbreaking work from DeepMind.
+**AI-powered physics simulation and inverse design — predict, visualise, and optimise engineering meshes in your browser.**
 
-> 🔬 **Original Paper**:  
-> [**Learning Mesh-Based Simulation with Graph Networks**](https://arxiv.org/abs/2010.03409)  
-> *Tobias Pfaff, Meire Fortunato, Alvaro Sanchez-Gonzalez, Peter W. Battaglia*  
-> **ICLR 2021**
+PhysIQ is a full-stack platform built on Graph Neural Networks (GNNs) that replaces slow finite-element solvers with fast neural surrogates. Run a fluid simulation in seconds instead of hours, then use the built-in inverse design engine to find the shape that hits your performance target.
+
 ---
 
-## ✨ Why This Project?
+## What it does
 
-- **Physics-aware learning**: Leverages mesh structure to respect geometric and physical priors.
-- **High performance**: Runs **10–100× faster** than traditional solvers while maintaining fidelity.
-- **Extensible**: Built on PyTorch Geometric—easy to adapt to new PDEs, materials, or domains.
+| Capability | Description |
+|---|---|
+| **Predict** | Run autoregressive GNN rollouts on CFD (cylinder flow) or cloth (flag) meshes — 10–100× faster than traditional solvers |
+| **Generate** | Give a drag or stress target; the AI proposes candidate designs via CVAE sampling or gradient-descent optimisation |
+| **Train** | Fine-tune the GNN on your own data, with live loss curves, remote GPU support, and architecture selection (GN / TNS / SAGE) |
+| **Visualise** | Animated mesh viewer, per-step RMSE, physics diagnostics, 3D cloth viewer |
+| **Dataset Studio** | Field distributions, outlier detection, node type breakdown, mesh quality metrics |
+| **Training Similarity** | Latent-space KDTree score — tells you how close a new mesh is to the training distribution before you trust the prediction |
+
 ---
 
-## 🛠️ Requirements
+## Quick start
 
-Install dependencies via:
+### 1. Install dependencies
 
 ```bash
+# Python backend
 pip install -r requirements.txt
+
+# Frontend
+cd app && npm install
 ```
 
-> 💡 **Note**: TensorFlow < 1.15.0 is required only for parsing the original TFRecord datasets.
-
-A `pyproject.toml` is also provided for tool configs (ruff, mypy, pytest) and project metadata.
-
----
-
-## 🚀 Quick Start
-
-### 1. Download the Dataset
-We use DeepMind’s `cylinder_flow` dataset:
+### 2. Get the data
 
 ```bash
-aria2c -x 8 -s 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/train.tfrecord -d data
-aria2c -x 8 -s 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/valid.tfrecord -d data
-aria2c -x 8 -s 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/test.tfrecord -d data
-```
+# CFD — cylinder flow (DeepMind dataset)
+aria2c -x 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/train.tfrecord -d data
+aria2c -x 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/test.tfrecord  -d data
 
-### 2. Parse TFRecords
-Convert to PyTorch-friendly format:
-
-```bash
+# Parse to PyTorch format
 python parse_tfrecord.py
 ```
-> Output saved in `./data/`.
 
-### 3. Train the Model
+### 3. Train
+
 ```bash
 python train.py
+# or via the UI — go to /train and click Start Training
 ```
 
-The UI writes a JSON config for `train.py`. You can also pass one manually:
-```bash
-python train.py --config runs/my_config.json
-```
-
-Config keys (all optional, defaults shown):
-```json
-{
-  "num_epochs": 100,
-  "batch_size": 20,
-  "lr": 1e-4,
-  "noise_std": 0.02,
-  "early_stopping_patience": 10,
-  "message_passing_num": 15
-}
-```
-
-FOR MULTI-GPU TRAINING:
+### 4. Launch the UI
 
 ```bash
-export NGPUS=2 # set as your machine's available GPUs
-torchrun --nproc_per_node=$NGPUS train_ddp.py --dataset_dir data
-```
-
-### 4. Run Rollouts & Visualize
-Generate long-horizon predictions and render videos:
-
-```bash
-python rollout.py          # saves results to ./result/
-python render_results.py   # generates videos in ./videos/
-```
-
-## 🌐 Web UI
-
-The project includes a **React + FastAPI** full-stack dashboard for training, inference, and result visualization.
-
-### Architecture
-
-```
-Browser (localhost:5173)
-  └── Vite dev server  →  proxy /api/*  →  FastAPI backend (port 8000)
-```
-
-### Startup
-
-**Terminal 1 — FastAPI backend:**
-```bash
-# From the repo root — activate the venv first
+# Terminal 1 — backend
 source venv/bin/activate
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2 — frontend
+cd app && npm run dev   # → http://localhost:5173
 ```
 
-> Use `python -m uvicorn` (not just `uvicorn`) to ensure it runs inside the venv
-> where all dependencies (torch, fastapi, scipy, etc.) are installed.
-> Full interactive API docs at: http://localhost:8000/docs
-
-**Terminal 2 — React frontend:**
-```bash
-cd app
-npm install
-npm run dev   # opens http://localhost:5173
-```
-
-All `/api/*` calls from the browser are proxied by Vite directly to FastAPI at port 8000.
-
-### Available Pages
-
-| Page | Route | Description |
-|------|-------|-------------|
-| Home / Dashboard | `/` | Status overview, GPU info, quick-start |
-| Training | `/train` | Configure + monitor training with live loss curves |
-| Predict | `/predict` | Run autoregressive rollouts, GPU performance panel |
-| Visualize | `/visualize?file=X` | 3-panel mesh viewer + RMSE + Diagnostics + Physics tabs |
-| Pipeline | `/pipeline` | End-to-end workflow DAG with live status |
-| Experiments | `/experiments` | Compare RMSE curves across saved rollouts |
-| Dataset Studio | `/dataset` | Dataset statistics, node count histogram, outlier flagging |
+API docs at `http://localhost:8000/docs`.
 
 ---
 
-### Remote GPU Training
+## Remote GPU
 
-To offload training to a remote GPU machine over SSH, configure it in the UI under **Training → Remote GPU**, or save a config manually:
+Training and inference can be offloaded to a remote GPU over SSH. Configure it in **Train → Remote GPU**, or create the config manually:
 
-```bash
-cat > runs/remote_gpu.json <<EOF
+```json
+// runs/remote_gpu.json
 {
-  "host": "your-gpu-machine.example.com",
+  "host": "your-gpu-machine",
   "port": 22,
-  "user": "ahmealy",
-  "venv_python": "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python",
+  "user": "you",
+  "venv_python": "/path/to/venv/bin/python",
   "enabled": true
 }
-EOF
 ```
 
-Requirements:
-- SSH key auth set up (`ssh-copy-id user@host`)
-- Shared filesystem — the repo root must be accessible at the same path on both machines (e.g. NFS mount)
-- The remote venv must have all dependencies installed
-
-When enabled, **Start Training** in the UI will run `train.py` on the remote machine. Logs stream back over SSH in real time.
-
-
-
-### Results on DeepMind’s `cylinder_flow`:
-| Demo 0 | Demo 1 |
-|------------|--------------|
-| ![Demo 0](videos/0.gif) | ![Demo 1](videos/1.gif) |
-
-### Results on **our own CFD-generated data** (new geometries & conditions):
-| Demo 2 | Demo 3 |
-|------------|--------------|
-| ![Demo 2](videos/2.gif) | ![Demo 3](videos/3.gif) |
-
-> ✅ The model generalizes well—even to unseen flow regimes and mesh configurations!
+Requirements: SSH key auth, shared filesystem (NFS or same path on both machines), dependencies installed in the remote venv.
 
 ---
 
-> ⭐ **If you find this project useful, please consider starring the repo!**  
-> Your support helps us keep improving open-source scientific ML tools.
+## Supported domains
+
+| Domain | Physics | Input | Output |
+|---|---|---|---|
+| `cylinder_flow` | Incompressible CFD | Mesh + cylinder position + inlet velocity | Velocity / pressure field over time |
+| `flag_simple` | Cloth dynamics | Mesh + handle positions | World position over time |
+
+---
+
+## Architecture
+
+```
+Browser (Vite dev server :5173)
+  └── /api/*  →  FastAPI backend (:8000)
+        ├── /train        — training + live log streaming
+        ├── /rollout      — autoregressive inference
+        ├── /generate     — CVAE + gradient-descent inverse design
+        ├── /dataset      — statistics + mesh quality
+        ├── /checkpoint   — model info
+        └── /status       — GPU, training state, events
+```
+
+The GNN follows the encoder–processor–decoder pattern from [MeshGraphNets (Pfaff et al., ICLR 2021)](https://arxiv.org/abs/2010.03409), extended with:
+- **TNS** (Transformer-based) and **SAGE** (GraphSAGE) processor variants
+- CVAE-based inverse design with Latin Hypercube sampling
+- Compiled C++ KDTree for latent-space similarity scoring
+
+---
+
+## Results
+
+| Cylinder flow — trajectory 0 | Cylinder flow — trajectory 1 |
+|---|---|
+| ![Demo 0](videos/0.gif) | ![Demo 1](videos/1.gif) |
+
+---
+
+## Project layout
+
+```
+api/          FastAPI routes (train, rollout, generate, dataset, status)
+app/          React + Tailwind frontend
+model/        GNN architecture (encoder, processor, decoder)
+confidence/   Latent-space KDTree similarity index (C++ + pybind11)
+train.py      Training entry point
+rollout.py    Inference entry point
+generate_ssh.py  Remote GPU generate dispatch
+tests/        pytest test suite
+```

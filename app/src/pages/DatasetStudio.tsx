@@ -5,6 +5,37 @@ import { MeshPlot } from '../components/MeshPlot';
 
 const cn = (...classes: any[]) => classes.filter(Boolean).join(' ');
 
+// Mesh quality tooltip tile — defined at module level to avoid remount on every render
+const MqTile: React.FC<{
+  label: string; value: string; sub: string;
+  bgCls?: string; valueCls?: string; tip: string;
+}> = ({ label, value, sub, bgCls, valueCls, tip }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className={cn('relative rounded-xl px-4 py-3 space-y-0.5', bgCls ?? 'bg-slate-800/50')}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <div className="flex items-center gap-1">
+        <p className="text-[10px] text-slate-500 font-bold uppercase leading-none">{label}</p>
+        <span className="text-slate-500 cursor-default select-none text-[10px] leading-none">ⓘ</span>
+      </div>
+      <p className={cn('text-lg font-bold font-mono', valueCls ?? 'text-white')}>{value}</p>
+      <p className="text-[10px] text-slate-500">{sub}</p>
+      {/* Tooltip */}
+      {open && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50
+                        w-60 rounded-lg bg-slate-800 border border-slate-700 shadow-2xl
+                        px-3 py-2.5 text-[10px] text-slate-300 leading-relaxed pointer-events-none">
+          {tip}
+          <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700" />
+        </div>
+      )}
+    </div>
+  );
+};
+
 const DOMAIN_OPTIONS = [
   { value: 'cylinder_flow', label: 'Cylinder Flow (CFD)', fieldLabel: 'Velocity', fieldUnit: 'm/s', energyLabel: 'Kinetic Energy (½‖v‖²)', fieldFormula: '‖v‖ = √(vx² + vy²)' },
   { value: 'flag_simple',   label: 'Flag Simple (Cloth)', fieldLabel: 'Position Magnitude', fieldUnit: 'm', energyLabel: 'Position Energy (½‖pos‖²)', fieldFormula: '‖pos‖ = √(x²+y²+z²)' },
@@ -408,33 +439,6 @@ export const DatasetStudio: React.FC = () => {
             const verdictBg    = mq.quality_ok
               ? 'bg-green-500/10 border-green-500/20'
               : 'bg-amber-500/10 border-amber-500/20';
-
-            // Reusable tooltip tile
-            const MqTile = ({
-              label, value, sub, bgCls, valueCls, tip,
-            }: {
-              label: string; value: string; sub: string;
-              bgCls?: string; valueCls?: string; tip: string;
-            }) => (
-              <div className={cn('relative group rounded-xl px-4 py-3 space-y-0.5', bgCls ?? 'bg-slate-800/50')}>
-                {/* label row with info icon */}
-                <div className="flex items-center gap-1">
-                  <p className="text-[10px] text-slate-500 font-bold uppercase leading-none">{label}</p>
-                  <span className="text-slate-600 cursor-default select-none text-[10px] leading-none">ⓘ</span>
-                </div>
-                <p className={cn('text-lg font-bold font-mono', valueCls ?? 'text-white')}>{value}</p>
-                <p className="text-[10px] text-slate-500">{sub}</p>
-                {/* Tooltip — appears above on hover */}
-                <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-20
-                                w-56 rounded-lg bg-slate-800 border border-slate-700 shadow-xl
-                                px-3 py-2.5 text-[10px] text-slate-300 leading-relaxed
-                                opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                  {tip}
-                  {/* Arrow */}
-                  <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700" />
-                </div>
-              </div>
-            );
 
             return (
               <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">

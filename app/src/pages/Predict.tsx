@@ -604,10 +604,6 @@ export const Predict: React.FC = () => {
                     <p className="text-[10px] text-slate-500 font-bold uppercase">Elapsed</p>
                     <p className="text-lg font-bold text-white">{rolloutResult.elapsed_seconds}s</p>
                   </div>
-                  <div>
-                    <p className="text-[10px] text-slate-500 font-bold uppercase">Speedup vs CFD</p>
-                    <p className="text-lg font-bold text-green-400">{rolloutResult.speedup}×</p>
-                  </div>
                 </div>
                 <button
                   onClick={() => navigate(`/visualize?file=${rolloutResult.pkl_path.split('/').pop()}`)}
@@ -625,7 +621,6 @@ export const Predict: React.FC = () => {
                   <div className="grid grid-cols-3 gap-4">
                     <MetricCard label="Elapsed" value={`${rolloutResult.elapsed_seconds}s`} />
                     <MetricCard label="Steps/sec" value={(progressTotal / rolloutResult.elapsed_seconds).toFixed(1)} />
-                    <MetricCard label="Speedup vs CFD" value={`${rolloutResult.speedup}×`} />
                     <MetricCard label="GPU Alloc" value={gpuStatus?.mem_alloc_gb != null ? `${gpuStatus.mem_alloc_gb} GB` : '—'} />
                     <MetricCard label="GPU Resrv" value={gpuStatus?.mem_reserved_gb != null ? `${gpuStatus.mem_reserved_gb} GB` : '—'} />
                     <MetricCard label="GPU Util" value={gpuStatus?.utilization != null ? `${gpuStatus.utilization}%` : '—'} />

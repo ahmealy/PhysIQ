@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Loader2, CheckCircle2, ArrowRight, History, Database, Info, Cpu, Server, Gauge } from 'lucide-react';
+import { Play, Loader2, CheckCircle2, ArrowRight, History, Database, Info, Cpu, Server, Gauge, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+
+const cn = (...classes: (string | undefined | false | null)[]) => classes.filter(Boolean).join(' ');
 
 export const Predict: React.FC = () => {
   const [datasetInfo, setDatasetInfo] = useState<any>(null);
@@ -35,7 +37,6 @@ export const Predict: React.FC = () => {
   // Keep isRunning in a ref so the fetch loop sees the latest value after navigation
   const isRunningRef = useRef(false);
   const navigate = useNavigate();
-  const cn = (...classes: any[]) => classes.filter(Boolean).join(' ');
 
   // Restore state on mount — if a rollout is already in progress (tracked by
   // a boolean we store in sessionStorage) reconnect the progress stream.
@@ -265,8 +266,13 @@ export const Predict: React.FC = () => {
     }
   };
 
-  // GPU device label
-  const gpuLabel = status?.gpu_available && status?.gpu_name ? status.gpu_name : null;
+  // Short hostname — "dvt-gpubig1.wv.mentorg.com" → "gpubig1"
+  // Take the first DNS label, then strip any leading "<prefix>-" environment tag
+  const shortHost = (host: string) => {
+    const label = host.split('.')[0];           // dvt-gpubig1
+    const dash  = label.indexOf('-');
+    return dash >= 0 ? label.slice(dash + 1) : label;  // gpubig1
+  };
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -453,12 +459,10 @@ export const Predict: React.FC = () => {
                 >
                   {(status?.gpu_available || remoteConfig) && (
                     <option value="cuda:0">
-                      {remoteConfig
-                        ? `cuda:0 (remote: ${remoteConfig.host})`
-                        : `cuda:0${gpuLabel ? ` (${gpuLabel})` : ''}`}
+                      {remoteConfig ? `cuda:0 (remote: ${shortHost(remoteConfig.host)})` : 'cuda:0'}
                     </option>
                   )}
-                  <option value="cpu">{remoteConfig ? `cpu (remote: ${remoteConfig.host})` : 'cpu'}</option>
+                  <option value="cpu">{remoteConfig ? `cpu (remote: ${shortHost(remoteConfig.host)})` : 'cpu'}</option>
                 </select>
                 {!statusLoaded && (
                   <p className="text-[10px] text-slate-500">Detecting GPU…</p>
@@ -474,7 +478,7 @@ export const Predict: React.FC = () => {
                   <Server className="w-4 h-4 text-blue-400 shrink-0" />
                   <div className="flex-1 min-w-0">
                     <p className="text-[11px] text-blue-300 font-bold">Remote GPU Enabled</p>
-                    <p className="text-[10px] text-blue-400/70 font-mono truncate">{remoteConfig.host}</p>
+                    <p className="text-[10px] text-blue-400/70 font-mono truncate">{shortHost(remoteConfig.host)}</p>
                   </div>
                   <span className="px-1.5 py-0.5 bg-blue-600/30 text-blue-300 text-[9px] font-bold rounded uppercase">cuda:0</span>
                 </div>
@@ -561,39 +565,90 @@ export const Predict: React.FC = () => {
             </section>
           )}
 
-          {/* Performance + Training Similarity — shown after rollout */}
-          {(rolloutResult || results.length > 0) && !isRunning && (
-            <div className="space-y-6">
-              <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Performance Metrics</h3>
-                <div className="grid grid-cols-3 gap-4">
-                  <MetricCard label="Elapsed" value={rolloutResult ? `${rolloutResult.elapsed_seconds}s` : '—'} />
-                  <MetricCard label="Steps/sec" value={rolloutResult ? (progressTotal / rolloutResult.elapsed_seconds).toFixed(1) : '—'} />
-                  <MetricCard label="Speedup" value={rolloutResult ? `${rolloutResult.speedup}x` : '—'} />
-                  <MetricCard label="GPU Alloc" value={gpuStatus?.mem_alloc_gb != null ? `${gpuStatus.mem_alloc_gb} GB` : '—'} />
-                  <MetricCard label="GPU Resrv" value={gpuStatus?.mem_reserved_gb != null ? `${gpuStatus.mem_reserved_gb} GB` : '—'} />
-                  <MetricCard label="GPU Util" value={gpuStatus?.utilization != null ? `${gpuStatus.utilization}%` : '—'} />
+          {/* Performance + Training Similarity moved to right column — nothing here */}
+
+        </div>
+
+        {/* Right column — results cards at top, then saved rollouts table */}
+        <div className="lg:col-span-2 space-y-6">
+
+          {/* Rollout Complete + Performance + Training Similarity — pinned at top of right col */}
+          {rolloutResult && (
+            <div className="space-y-4">
+              {/* Success header + View Results */}
+              <section className="bg-green-600/10 border border-green-500/20 rounded-2xl p-6 space-y-4">
+                <div className="flex items-center gap-2 text-green-400">
+                  <CheckCircle2 className="w-5 h-5" />
+                  <span className="font-bold uppercase tracking-wider text-xs">Rollout Complete</span>
+                  {domain && (
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                      domain === "flag_simple"
+                        ? "bg-purple-500/20 text-purple-400"
+                        : "bg-blue-500/20 text-blue-400"
+                    }`}>
+                      {domain === "flag_simple" ? "CLOTH MODEL" : "CFD MODEL"}
+                    </span>
+                  )}
+                  {domain === 'cylinder_flow' && rolloutResult?.target_field && (
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                      rolloutResult.target_field === "pressure"
+                        ? "bg-orange-500/20 text-orange-400"
+                        : "bg-cyan-500/20 text-cyan-400"
+                    }`}>
+                      {rolloutResult.target_field === "pressure" ? "PRESSURE" : "VELOCITY"}
+                    </span>
+                  )}
                 </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">Elapsed</p>
+                    <p className="text-lg font-bold text-white">{rolloutResult.elapsed_seconds}s</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase">Speedup vs CFD</p>
+                    <p className="text-lg font-bold text-green-400">{rolloutResult.speedup}×</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => navigate(`/visualize?file=${rolloutResult.pkl_path.split('/').pop()}`)}
+                  className="w-full py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-2"
+                >
+                  View Results
+                  <ArrowRight className="w-4 h-4" />
+                </button>
               </section>
 
-              {/* Training Similarity — latent-space KDTree score (confidence_score) */}
+              {/* Performance metrics */}
+              {!isRunning && (
+                <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
+                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Performance Metrics</h3>
+                  <div className="grid grid-cols-3 gap-4">
+                    <MetricCard label="Elapsed" value={`${rolloutResult.elapsed_seconds}s`} />
+                    <MetricCard label="Steps/sec" value={(progressTotal / rolloutResult.elapsed_seconds).toFixed(1)} />
+                    <MetricCard label="Speedup vs CFD" value={`${rolloutResult.speedup}×`} />
+                    <MetricCard label="GPU Alloc" value={gpuStatus?.mem_alloc_gb != null ? `${gpuStatus.mem_alloc_gb} GB` : '—'} />
+                    <MetricCard label="GPU Resrv" value={gpuStatus?.mem_reserved_gb != null ? `${gpuStatus.mem_reserved_gb} GB` : '—'} />
+                    <MetricCard label="GPU Util" value={gpuStatus?.utilization != null ? `${gpuStatus.utilization}%` : '—'} />
+                  </div>
+                </section>
+              )}
+
+              {/* Training Similarity */}
               {rolloutResult?.confidence_score != null && (() => {
                 const score: number = rolloutResult.confidence_score;
                 const isGreen  = score >= 0.8;
                 const isAmber  = score >= 0.5 && score < 0.8;
-                const isRed    = score < 0.5;
                 const barColor = isGreen ? 'bg-green-500' : isAmber ? 'bg-amber-500' : 'bg-red-500';
                 const badge = isGreen
-                  ? { label: 'Model Applicable',   cls: 'bg-green-500/20 text-green-400 border-green-500/30' }
+                  ? { label: 'High similarity',  cls: 'bg-green-500/20 text-green-400 border-green-500/30' }
                   : isAmber
-                    ? { label: 'Estimate — verify', cls: 'bg-amber-500/20 text-amber-400 border-amber-500/30' }
-                    : { label: 'Extrapolating',      cls: 'bg-red-500/20   text-red-400   border-red-500/30'   };
+                    ? { label: 'Partial match',   cls: 'bg-amber-500/20 text-amber-400 border-amber-500/30' }
+                    : { label: 'Low similarity',  cls: 'bg-red-500/20   text-red-400   border-red-500/30'   };
                 const guidance = isGreen
                   ? 'This mesh is well within the training distribution. Predictions should be reliable.'
                   : isAmber
                     ? 'This mesh is somewhat novel. Predictions are estimates — verify critical results independently.'
-                    : 'This mesh is far from training data. The model is extrapolating — run a full FEM/CFD solver for confidence.';
-
+                    : 'This mesh differs significantly from the training set. Consider verifying with a full CFD solver.';
                 return (
                   <section className={cn(
                     'border rounded-2xl p-6 space-y-4',
@@ -610,8 +665,6 @@ export const Predict: React.FC = () => {
                         {badge.label}
                       </span>
                     </div>
-
-                    {/* Score + bar */}
                     <div className="flex items-end gap-4">
                       <span className={cn('text-4xl font-bold font-mono', isGreen ? 'text-green-400' : isAmber ? 'text-amber-400' : 'text-red-400')}>
                         {(score * 100).toFixed(0)}<span className="text-xl text-slate-500">%</span>
@@ -621,22 +674,18 @@ export const Predict: React.FC = () => {
                           <div className={cn('h-full rounded-full transition-all duration-500', barColor)}
                                style={{ width: `${Math.max(0, score * 100)}%` }} />
                         </div>
-                        {/* Threshold markers */}
                         <div className="relative mt-0.5">
                           <span className="absolute text-[8px] text-slate-700" style={{ left: '50%', transform: 'translateX(-50%)' }}>50%</span>
                           <span className="absolute text-[8px] text-slate-700" style={{ left: '80%', transform: 'translateX(-50%)' }}>80%</span>
                         </div>
                       </div>
                     </div>
-
                     <p className="text-[10px] text-slate-400 leading-relaxed">{guidance}</p>
-
-                    {/* Threshold legend */}
                     <div className="grid grid-cols-3 gap-2 pt-1">
                       {[
-                        { range: '≥ 80%', label: 'Green light',  sub: 'Trust predictions',        cls: 'border-green-500/30 bg-green-500/5  text-green-400' },
-                        { range: '50–80%', label: 'Amber',        sub: 'Estimates — verify',       cls: 'border-amber-500/30 bg-amber-500/5  text-amber-400' },
-                        { range: '< 50%',  label: 'Red',          sub: 'Run full FEM/CFD',          cls: 'border-red-500/30   bg-red-500/5    text-red-400'   },
+                        { range: '≥ 80%',  label: 'High similarity', sub: 'Trust predictions',   cls: 'border-green-500/30 bg-green-500/5  text-green-400' },
+                        { range: '50–80%', label: 'Partial match',    sub: 'Estimates — verify', cls: 'border-amber-500/30 bg-amber-500/5  text-amber-400' },
+                        { range: '< 50%',  label: 'Low similarity',   sub: 'Run full FEM/CFD',   cls: 'border-red-500/30   bg-red-500/5    text-red-400'   },
                       ].map(t => (
                         <div key={t.range} className={cn('rounded-lg border px-2 py-1.5 text-center', t.cls)}>
                           <p className="text-[9px] font-bold uppercase">{t.range}</p>
@@ -645,7 +694,6 @@ export const Predict: React.FC = () => {
                         </div>
                       ))}
                     </div>
-
                     <p className="text-[9px] text-slate-600 italic">
                       Computed in the model's latent space: nearest-neighbour distance to training embeddings via compiled KDTree.
                       Score = 1 − (d_min / training_diameter). Higher = more similar to training data.
@@ -656,54 +704,7 @@ export const Predict: React.FC = () => {
             </div>
           )}
 
-          {/* Success + View Results button */}
-          {rolloutResult && (
-            <section className="bg-green-600/10 border border-green-500/20 rounded-2xl p-6 space-y-4">
-              <div className="flex items-center gap-2 text-green-400">
-                <CheckCircle2 className="w-5 h-5" />
-                <span className="font-bold uppercase tracking-wider text-xs">Rollout Complete</span>
-                {domain && (
-                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                    domain === "flag_simple"
-                      ? "bg-purple-500/20 text-purple-400"
-                      : "bg-blue-500/20 text-blue-400"
-                  }`}>
-                    {domain === "flag_simple" ? "CLOTH MODEL" : "CFD MODEL"}
-                  </span>
-                )}
-                {domain === 'cylinder_flow' && rolloutResult?.target_field && (
-                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                    rolloutResult.target_field === "pressure"
-                      ? "bg-orange-500/20 text-orange-400"
-                      : "bg-cyan-500/20 text-cyan-400"
-                  }`}>
-                    {rolloutResult.target_field === "pressure" ? "PRESSURE" : "VELOCITY"}
-                  </span>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase">Elapsed</p>
-                  <p className="text-lg font-bold text-white">{rolloutResult.elapsed_seconds}s</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase">Speedup</p>
-                  <p className="text-lg font-bold text-green-400">{rolloutResult.speedup}x</p>
-                </div>
-              </div>
-              <button
-                onClick={() => navigate(`/visualize?file=${rolloutResult.pkl_path.split('/').pop()}`)}
-                className="w-full py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-2"
-              >
-                View Results
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </section>
-          )}
-        </div>
-
-        {/* Recent rollouts table */}
-        <div className="lg:col-span-2 space-y-6">
+          {/* Saved rollouts table */}
           <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/80 flex items-center gap-2">
               <History className="w-4 h-4 text-slate-400" />
@@ -711,7 +712,22 @@ export const Predict: React.FC = () => {
             </div>
             <div className="divide-y divide-slate-800">
               {results.length > 0 ? (
-                results.map((res) => (
+                results.map((res) => {
+                  const cs: number | null | undefined = res.confidence_score;
+                  const hasScore = cs != null;
+                  const scoreGreen = hasScore && cs! >= 0.8;
+                  const scoreAmber = hasScore && cs! >= 0.5 && cs! < 0.8;
+                  const scoreCls = scoreGreen
+                    ? 'bg-green-500/20 text-green-400 border-green-500/30'
+                    : scoreAmber
+                      ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                      : 'bg-red-500/20 text-red-400 border-red-500/30';
+                  const handleDelete = async () => {
+                    if (!confirm(`Delete ${res.filename}?`)) return;
+                    await fetch(`/api/results/${res.filename}`, { method: 'DELETE' });
+                    fetch('/api/results').then(r => r.json()).then(setResults).catch(() => {});
+                  };
+                  return (
                   <div key={res.filename} className="p-4 hover:bg-slate-900/50 transition-colors flex items-center justify-between group">
                     <div className="flex items-center gap-4">
                       <div className="w-10 h-10 bg-slate-950 rounded-lg flex items-center justify-center text-slate-500">
@@ -720,18 +736,31 @@ export const Predict: React.FC = () => {
                       <div>
                         <h4 className="text-sm font-medium text-slate-200">{res.filename}</h4>
                         <p className="text-[10px] text-slate-500 uppercase tracking-wider">
-                          Trajectory {res.trajectory_index} • {res.size_mb} MB • {new Date(res.created).toLocaleDateString()}
+                          Trajectory {res.trajectory_index ?? '?'} • {res.size_mb} MB • {new Date(res.created).toLocaleDateString()}
                         </p>
+                        {hasScore && (
+                          <SimilarityBadge score={cs!} />
+                        )}
                       </div>
                     </div>
-                    <Link
-                      to={`/visualize?file=${res.filename}`}
-                      className="px-4 py-1.5 bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white rounded-lg text-xs font-bold transition-all"
-                    >
-                      Analyze
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link
+                        to={`/visualize?file=${res.filename}`}
+                        className="px-4 py-1.5 bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white rounded-lg text-xs font-bold transition-all"
+                      >
+                        Analyze
+                      </Link>
+                      <button
+                        onClick={handleDelete}
+                        className="p-1.5 text-slate-700 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
+                        title="Delete rollout"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="p-12 text-center space-y-2">
                   <Database className="w-8 h-8 text-slate-700 mx-auto" />
@@ -744,6 +773,40 @@ export const Predict: React.FC = () => {
         </div>
       </div>
     </div>
+  );
+};
+
+const SimilarityBadge: React.FC<{ score: number }> = ({ score }) => {
+  const [open, setOpen] = useState(false);
+  const isGreen = score >= 0.8;
+  const isAmber = score >= 0.5 && score < 0.8;
+  const cls = isGreen
+    ? 'bg-green-500/20 text-green-400 border-green-500/30'
+    : isAmber
+      ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+      : 'bg-red-500/20 text-red-400 border-red-500/30';
+  const tip = isGreen
+    ? 'Well within training distribution — predictions are reliable.'
+    : isAmber
+      ? 'Somewhat novel mesh — predictions are estimates, verify critical results.'
+      : 'Differs significantly from training data — consider verifying with a full solver.';
+  const label = isGreen ? 'High similarity' : isAmber ? 'Partial match' : 'Low similarity';
+  return (
+    <span className="relative inline-block mt-1"
+          onMouseEnter={() => setOpen(true)}
+          onMouseLeave={() => setOpen(false)}>
+      <span className={cn('px-1.5 py-0.5 rounded border text-[9px] font-bold uppercase cursor-default', cls)}>
+        {(score * 100).toFixed(0)}% · {label}
+      </span>
+      {open && (
+        <span className="absolute bottom-full left-0 mb-2 z-50 w-56 bg-slate-800 border border-slate-700 text-slate-200 text-[10px] rounded-lg px-3 py-2 shadow-xl leading-relaxed pointer-events-none">
+          <span className="block font-bold mb-1">Training Similarity</span>
+          {tip}
+          <span className="block mt-1 text-slate-500">Latent-space KDTree score: 1 − d_min/diameter</span>
+          <span className="absolute top-full left-4 border-4 border-transparent border-t-slate-700" />
+        </span>
+      )}
+    </span>
   );
 };
 

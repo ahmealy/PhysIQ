@@ -5,6 +5,7 @@
 import math
 import os
 import pickle
+import re
 from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional
@@ -57,10 +58,41 @@ class _LRUCache:
 _pkl_cache = _LRUCache(_PKL_CACHE_MAX)
 
 
+def _read_meta_cheap(fname: str) -> dict:
+    """
+    Return the meta dict from a result PKL without loading the large arrays.
+    Uses the LRU cache when the file is already warm; otherwise opens the file
+    and reads just enough to extract the metadata tuple element.
+    Falls back to {} on any error (bad file, old 2-tuple format, etc.).
+    """
+    path = os.path.join(RESULT_DIR, fname)
+    if not os.path.exists(path):
+        return {}
+    mtime = os.path.getmtime(path)
+    cache_key = (fname, mtime)
+    cached = _pkl_cache.get(cache_key)
+    if cached is not None:
+        # cache stores (predicted, targets, crds, meta, triangles)
+        return cached[3]
+    # Not cached — unpickle only the metadata.  pickle.load() always reads the
+    # full object, so we accept that cost here; it also populates the cache.
+    try:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        if len(data) == 3:
+            return data[2]          # (result, crds, meta)
+    except Exception:
+        pass
+    return {}
+
+
 def _list_pkl_files() -> list[str]:
     if not os.path.exists(RESULT_DIR):
         return []
-    return sorted([f for f in os.listdir(RESULT_DIR) if f.endswith(".pkl")])
+    files = [f for f in os.listdir(RESULT_DIR) if f.endswith(".pkl")]
+    # Sort newest-first by file creation time
+    files.sort(key=lambda f: os.path.getctime(os.path.join(RESULT_DIR, f)), reverse=True)
+    return files
 
 
 def _load_pkl(filename: str):
@@ -167,11 +199,18 @@ def list_results():
     for fname in files:
         path = os.path.join(RESULT_DIR, fname)
         stat = os.stat(path)
-        # Try to infer trajectory index from filename (result0.pkl → 0)
+        # Try to infer trajectory index from filename.
+        # Handles patterns like: result_traj0_20260415_182052.pkl → 0
+        #                        result0.pkl → 0
+        #                        rollout_traj_5_20260415.pkl → 5
         try:
-            traj_idx = int("".join(filter(str.isdigit, fname.replace(".pkl", ""))))
-        except ValueError:
+            m = re.search(r'(?:traj[_]?|result[_]?)(\d+)', fname)
+            traj_idx = int(m.group(1)) if m else None
+        except (ValueError, AttributeError):
             traj_idx = None
+        meta = _read_meta_cheap(fname)
+        confidence_score = meta.get("confidence_score", None)
+        domain = meta.get("domain", None)
         out.append({
             "filename":          fname,
             "path":              path,
@@ -179,6 +218,8 @@ def list_results():
             "created":           datetime.fromtimestamp(
                 stat.st_ctime, tz=timezone.utc).isoformat(),
             "size_mb":           round(stat.st_size / 1e6, 2),
+            "confidence_score":  confidence_score,
+            "domain":            domain,
         })
     return out
 

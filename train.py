@@ -124,7 +124,13 @@ else:
         T.Distance(norm=False)
     ])
 
-optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg['lr'])
+# TNS/SAGE use attention/aggregation ops that produce larger gradient magnitudes
+# than GN's pure MLPs — use a lower default LR to avoid NaN divergence.
+_arch = cfg.get('architecture', 'gn')
+_effective_lr = cfg['lr'] if _arch == 'gn' else min(cfg['lr'], 3e-5)
+optimizer = torch.optim.Adam(simulator.parameters(), lr=_effective_lr)
+if _effective_lr != cfg['lr']:
+    print(f'[train] {_arch.upper()} architecture: reducing LR {cfg["lr"]:.2e} → {_effective_lr:.2e}')
 print('Optimizer initialized')
 
 # ── LR scheduler (cloth only — DeepMind exponential decay per gradient step) ─
@@ -232,6 +238,7 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
             _warmup_remaining -= 1
         else:
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             # Per-step LR decay (cloth only)
             if lr_scheduler is not None:

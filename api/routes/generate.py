@@ -1084,8 +1084,12 @@ async def generate_rollout(session_id: str, candidate_id: int,
             import torch_geometric.transforms as T
             from model.flag_simulator import FlagSimulator
 
-            ckpt_data = torch.load(cloth_ckpt, map_location=device, weights_only=False)
-            sim = FlagSimulator(message_passing_num=15, device=device)
+            _device = device
+            if _device.startswith("cuda") and not torch.cuda.is_available():
+                _device = "cpu"
+
+            ckpt_data = torch.load(cloth_ckpt, map_location=_device, weights_only=False)
+            sim = FlagSimulator(message_passing_num=15, device=_device)
             sd = ckpt_data["model_state_dict"]
             cur_sd = sim.state_dict()
             filtered = {k: v for k, v in sd.items()
@@ -1099,13 +1103,13 @@ async def generate_rollout(session_id: str, candidate_id: int,
                     T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)
                 ])
                 g = transformer(g)
-            g = g.to(device)
+            g = g.to(_device)
 
             # Cloth node feature layout: x[:,0:3]=world_pos, x[:,3]=node_type
             # graph.world_pos and graph.prev_x are set by ClothMeshBuilder
             if hasattr(g, "world_pos") and g.world_pos is not None:
-                cur_world  = g.world_pos.clone().to(device)   # [N, 3]
-                prev_world = g.prev_x.clone().to(device)      # [N, 3]
+                cur_world  = g.world_pos.clone().to(_device)   # [N, 3]
+                prev_world = g.prev_x.clone().to(_device)      # [N, 3]
             else:
                 # Fallback: extract world_pos from x columns 0:3
                 cur_world  = g.x[:, :3].clone()
@@ -1169,7 +1173,14 @@ async def generate_rollout(session_id: str, candidate_id: int,
             import torch_geometric.transforms as T
             from utils.utils import NodeType
 
-            sim = get_model(cfd_ckpt, device=device)
+            # Fall back to CPU if the requested device isn't available locally
+            # (common when the API runs on a CPU-only machine but the frontend
+            # still has cuda:0 selected from a previous remote-GPU session).
+            _device = device
+            if _device.startswith("cuda") and not torch.cuda.is_available():
+                _device = "cpu"
+
+            sim = get_model(cfd_ckpt, device=_device)
             sim.eval()
 
             g = graph.clone()
@@ -1178,7 +1189,7 @@ async def generate_rollout(session_id: str, candidate_id: int,
                     T.FaceToEdge(), T.Cartesian(norm=False), T.Distance(norm=False)
                 ])
                 g = transformer(g)
-            g = g.to(device)
+            g = g.to(_device)
 
             node_type     = g.x[:, 0].long()
             current_vel   = g.x[:, 1:3].clone()
@@ -1220,6 +1231,8 @@ async def generate_rollout(session_id: str, candidate_id: int,
         try:
             filename = await loop.run_in_executor(None, _run_cfd_rollout)
         except Exception as exc:
+            import traceback
+            logging.getLogger(__name__).error("generate_rollout CFD error:\n%s", traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"Rollout failed: {exc}")
 
     return {"pkl_filename": filename}

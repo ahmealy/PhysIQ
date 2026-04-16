@@ -444,7 +444,10 @@ export const Visualize: React.FC = () => {
             <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="font-semibold text-white">Overfitting Detector</h3>
+                  <h3 className="font-semibold text-white flex items-center gap-1.5">
+                    Overfitting Detector
+                    <span title="Compares training loss vs validation loss across epochs. Green = both losses low (good fit). Amber = validation loss still declining (underfitting). Red = validation loss much higher than training loss (overfitting). The shaded regions highlight each regime." className="text-slate-500 hover:text-slate-300 cursor-help text-xs">ⓘ</span>
+                  </h3>
                   <p className="text-[10px] text-slate-500 mt-0.5">{overfittingStatus().desc}</p>
                 </div>
                 <span className={cn("px-3 py-1 rounded-full text-xs font-bold", overfittingStatus().color)}>{overfittingStatus().label}</span>
@@ -498,7 +501,10 @@ export const Visualize: React.FC = () => {
             </section>
 
             <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
-              <h3 className="font-semibold text-white">MAE Dashboard</h3>
+              <h3 className="font-semibold text-white flex items-center gap-1.5">
+                MAE Dashboard
+                <span title="Mean Absolute Error (MAE) and Root Mean Square Error (RMSE) between predicted and ground-truth velocity fields at each timestep. MAE weights all errors equally; RMSE penalises large outliers more heavily. Both should stay low — a rising curve means the GNN is drifting from the true trajectory over time." className="text-slate-500 hover:text-slate-300 cursor-help text-xs">ⓘ</span>
+              </h3>
               <div className="grid grid-cols-3 gap-4">
                 <MetricItem label="MAE @ t=0"   value={rmseData?.mae_at_0   != null ? rmseData.mae_at_0.toFixed(6)   : '—'} />
                 <MetricItem label="MAE @ t=end" value={rmseData?.mae_at_end != null ? rmseData.mae_at_end.toFixed(6) : '—'} />
@@ -530,7 +536,10 @@ export const Visualize: React.FC = () => {
 
           <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
             <div className="flex justify-between items-center">
-              <h3 className="font-semibold text-white">Error Heatmap & Hotspot Analysis</h3>
+              <h3 className="font-semibold text-white flex items-center gap-1.5">
+                    Error Heatmap & Hotspot Analysis
+                    <span title="Per-node error magnitude |predicted − ground truth| rendered on the mesh at the current timestep. Bright red = large local error. The hotspot node (max error) is highlighted — useful for diagnosing which mesh regions the model struggles with (e.g. near the cylinder wall or wake zone)." className="text-slate-500 hover:text-slate-300 cursor-help text-xs">ⓘ</span>
+                  </h3>
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <p className="text-[10px] text-slate-500 font-bold uppercase">{errorLabel}</p>
@@ -577,7 +586,10 @@ export const Visualize: React.FC = () => {
             return (
               <div className={`border rounded-xl p-4 space-y-3 ${sectionCls}`}>
                 <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Training Similarity</h3>
+                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                    Training Similarity
+                    <span title="How close this rollout's conditions are to the training distribution. Computed as 1 − (distance to nearest training embedding / training cluster diameter) using a latent-space KD-tree. ≥80% = reliable prediction. 50–80% = treat as estimate. <50% = consider verifying with a full CFD solver." className="text-slate-400 hover:text-slate-200 cursor-help font-normal text-[10px] normal-case tracking-normal">ⓘ</span>
+                  </h3>
                   <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border ${badge.cls}`}>
                     {badge.label}
                   </span>
@@ -658,7 +670,10 @@ export const Visualize: React.FC = () => {
                 <div className={cn("space-y-6", isLoadingPhysics && "opacity-60 pointer-events-none")}>
                   <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
                     <div className="flex items-center justify-between">
-                      <h3 className="font-semibold text-white">Vorticity Comparison (ω = ∂vy/∂x − ∂vx/∂y)</h3>
+                      <h3 className="font-semibold text-white flex items-center gap-1.5">
+                        Vorticity Comparison (ω = ∂vy/∂x − ∂vx/∂y)
+                        <span title="Vorticity measures local fluid rotation at each mesh node. Positive ω (red) = counter-clockwise spin; negative ω (blue) = clockwise spin. In cylinder flow you should see alternating vortices shed from the cylinder — the Kármán vortex street. Compare predicted vs ground truth to see if the GNN captures this shedding pattern." className="text-slate-500 hover:text-slate-300 cursor-help text-xs">ⓘ</span>
+                      </h3>
                       {isLoadingPhysics && <span className="text-[10px] text-slate-500 animate-pulse">Updating…</span>}
                     </div>
                     <div className="grid grid-cols-2 gap-4 h-[300px]">
@@ -671,7 +686,10 @@ export const Visualize: React.FC = () => {
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
                       <div className="flex justify-between items-center">
-                        <h3 className="font-semibold text-white">Energy Conservation</h3>
+                        <h3 className="font-semibold text-white flex items-center gap-1.5">
+                          Energy Conservation
+                          <span title="Kinetic energy E = ½ Σ |v|² summed over all nodes at each timestep. An ideal incompressible solver conserves energy within each flow cycle. A steadily rising predicted curve (energy drift > 0) means the GNN is adding spurious energy; a falling curve means it is dissipating too much." className="text-slate-500 hover:text-slate-300 cursor-help text-xs">ⓘ</span>
+                        </h3>
                         <div className="text-right">
                           <p className="text-[10px] text-slate-500 font-bold uppercase">ΔE (Final)</p>
                           <p className={cn("text-sm font-bold", (physicsData.energy_pred_series[physicsData.energy_pred_series.length - 1] - physicsData.energy_target_series[physicsData.energy_target_series.length - 1]) > 0 ? "text-orange-400" : "text-green-400")}>
@@ -695,7 +713,10 @@ export const Visualize: React.FC = () => {
                     </section>
 
                     <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
-                      <h3 className="font-semibold text-white">Divergence Proxy (Mass Conservation)</h3>
+                      <h3 className="font-semibold text-white flex items-center gap-1.5">
+                        Divergence Proxy (Mass Conservation)
+                        <span title="Divergence ∇·v = ∂vx/∂x + ∂vy/∂y measures how much fluid is being created or destroyed at each node. For incompressible flow this should be ≈ 0 everywhere. A rising divergence proxy means the GNN is violating mass conservation — common in long rollouts as errors accumulate." className="text-slate-500 hover:text-slate-300 cursor-help text-xs">ⓘ</span>
+                      </h3>
                       <div className="h-48">
                         <ResponsiveContainer width="100%" height="100%">
                           <LineChart data={physicsData.divergence_pred.map((v: any, i: any) => ({ t: i * 0.01, pred: v, target: physicsData.divergence_target[i] }))}>

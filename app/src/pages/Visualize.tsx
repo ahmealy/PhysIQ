@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Play, Pause, SkipBack, SkipForward, Info, Download, Trash2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Legend } from 'recharts';
@@ -66,17 +66,24 @@ export const Visualize: React.FC = () => {
     }).catch(() => {});
   }, [filename]);
 
+  const physicsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!filename || activeTab !== 'physics') return;
-    setIsLoadingPhysics(true);
-    fetch(`/api/results/${filename}/physics?t=${t}`)
-      .then(r => r.json())
-      .then(data => {
-        setPhysicsData(data);
-        setPhysicsEverLoaded(true);
-        setIsLoadingPhysics(false);
-      })
-      .catch(() => setIsLoadingPhysics(false));
+    // Only show the full loading spinner on the very first load (no data yet).
+    // For subsequent frames, update silently — no flicker.
+    if (!physicsEverLoaded) setIsLoadingPhysics(true);
+    if (physicsTimerRef.current) clearTimeout(physicsTimerRef.current);
+    physicsTimerRef.current = setTimeout(() => {
+      fetch(`/api/results/${filename}/physics?t=${t}`)
+        .then(r => r.json())
+        .then(data => {
+          setPhysicsData(data);
+          setPhysicsEverLoaded(true);
+          setIsLoadingPhysics(false);
+        })
+        .catch(() => setIsLoadingPhysics(false));
+    }, 150); // 150 ms debounce — skips intermediate frames while scrubbing
+    return () => { if (physicsTimerRef.current) clearTimeout(physicsTimerRef.current); };
   }, [t, activeTab, filename]);
 
   useEffect(() => {
@@ -645,12 +652,15 @@ export const Visualize: React.FC = () => {
             </div>
           ) : (
             <>
-              {isLoadingPhysics ? (
+              {isLoadingPhysics && !physicsEverLoaded ? (
                 <div className="p-12 text-center text-slate-500">Computing physics metrics...</div>
               ) : physicsData && (
-                <>
+                <div className={cn("space-y-6", isLoadingPhysics && "opacity-60 pointer-events-none")}>
                   <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
-                    <h3 className="font-semibold text-white">Vorticity Comparison (ω = ∂vy/∂x − ∂vx/∂y)</h3>
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold text-white">Vorticity Comparison (ω = ∂vy/∂x − ∂vx/∂y)</h3>
+                      {isLoadingPhysics && <span className="text-[10px] text-slate-500 animate-pulse">Updating…</span>}
+                    </div>
                     <div className="grid grid-cols-2 gap-4 h-[300px]">
                       <MeshPlot crds={metadata.crds} triangles={metadata.triangles} values={physicsData.vorticity_target} title="Ground Truth ω" minVal={physicsData.omega_min} maxVal={physicsData.omega_max} colorScale={d3.scaleSequential(d3.interpolateRdBu).domain([physicsData.omega_max, physicsData.omega_min])} domain={metadata.domain} />
                       <MeshPlot crds={metadata.crds} triangles={metadata.triangles} values={physicsData.vorticity_pred}   title="Predicted ω"     minVal={physicsData.omega_min} maxVal={physicsData.omega_max} colorScale={d3.scaleSequential(d3.interpolateRdBu).domain([physicsData.omega_max, physicsData.omega_min])} domain={metadata.domain} />
@@ -700,7 +710,7 @@ export const Visualize: React.FC = () => {
                       <p className="text-[10px] text-slate-500 text-center">Spikes indicate regions where mass conservation is violated.</p>
                     </section>
                   </div>
-                </>
+                </div>
               )}
             </>
           )}

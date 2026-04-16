@@ -298,8 +298,11 @@ def train_start(config: TrainConfig):
 
     # fresh_start: delete existing checkpoint so train.py starts from epoch 1
     arch = config.architecture or "gn"
+    _tf = config.target_field if config.domain == "cylinder_flow" else "velocity"
     if config.domain == "flag_simple":
         arch_ckpt_filename = f"flag_best_model_{arch}.pth"
+    elif _tf == "pressure":
+        arch_ckpt_filename = f"best_model_{arch}_pressure.pth"
     else:
         arch_ckpt_filename = f"best_model_{arch}.pth"
     arch_ckpt_path = os.path.join(os.path.dirname(domain_cfg["checkpoint"]), arch_ckpt_filename)
@@ -316,7 +319,6 @@ def train_start(config: TrainConfig):
         ("cylinder_flow", "pressure"):  {"output_size": 1, "node_input_size": 10, "edge_input_size": 3},
         ("flag_simple",   "velocity"):  {"output_size": 3, "node_input_size": 12, "edge_input_size": 7},
     }
-    _tf = config.target_field if config.domain == "cylinder_flow" else "velocity"
     key = (config.domain, _tf)
     if key in _DOMAIN_SIZES:
         sizes = _DOMAIN_SIZES[key]

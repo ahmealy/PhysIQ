@@ -198,6 +198,7 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     confidence_score = None
     _domain_slug = req.domain.replace("_", "")  # cylinderflow, flagsimple
     index_path = os.path.join("runs", f"embedding_index_{_domain_slug}.pkl")
+    logger.info("Confidence index path: %s (cwd=%s, exists=%s)", index_path, os.getcwd(), os.path.exists(index_path))
     if os.path.exists(index_path):
         # Warn if index predates the checkpoint — scores may be stale
         try:
@@ -225,8 +226,17 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
                 _first_graph = transformer(_first_graph)
             _emb = extract_embedding(model, _first_graph, device=device)
             confidence_score = float(_index.query(_emb))
-        except Exception:
-            pass  # confidence is optional — never block the rollout
+            logger.info(
+                "Confidence debug — emb_norm=%.4f emb_mean=%.4f "
+                "train_diameter=%.4f d_min=%.4f score=%.4f",
+                float((_emb ** 2).sum() ** 0.5),
+                float(_emb.mean()),
+                _index.train_diameter,
+                float(1.0 - confidence_score) * _index.train_diameter,
+                confidence_score,
+            )
+        except Exception as _ce:
+            logger.warning("Confidence score failed: %s", _ce, exc_info=True)
 
     # Save pkl
     os.makedirs("result", exist_ok=True)
@@ -393,20 +403,24 @@ async def list_checkpoints(domain: str = "cylinder_flow"):
             epoch = int(ckpt.get("epoch", 0))
             vloss = float(ckpt.get("valid_loss", float("nan")))
             ckpt_domain = ckpt.get("domain", "cylinder_flow")
+            target_field = ckpt.get("target_field", "velocity")
             import math
             vloss_safe = round(vloss, 6) if math.isfinite(vloss) else None
             loss_str   = f"{vloss:.4f}" if math.isfinite(vloss) else "n/a"
+            tf_label   = f" [{target_field}]" if ckpt_domain == "cylinder_flow" and target_field != "velocity" else ""
             result.append({
                 "path":         path,
                 "domain":       ckpt_domain,
                 "architecture": arch,
+                "target_field": target_field,
                 "epoch":        epoch,
                 "valid_loss":   vloss_safe,
                 "is_default":   path == default,
-                "label":        f"{arch.upper()} · ep{epoch} · loss={loss_str}",
+                "label":        f"{arch.upper()}{tf_label} · ep{epoch} · loss={loss_str}",
             })
         except Exception:
             result.append({"path": path, "domain": domain, "architecture": "?",
+                           "target_field": "velocity",
                            "epoch": 0, "valid_loss": None, "is_default": path == default,
                            "label": path})
     # Build arch summary: best (lowest valid_loss) physics checkpoint per domain × arch
@@ -520,6 +534,10 @@ async def run_rollout(req: RolloutRequest):
                             payload = json.loads(line[6:])
                             if payload.get("type") == "done":
                                 done_payload = payload
+                                # Log confidence debug info from the remote script
+                                _dbg = payload.get("_confidence_debug", "")
+                                if _dbg:
+                                    logger.info("[rollout_ssh confidence] %s", _dbg)
                                 # Don't yield yet — copy the file first, then yield done
                                 continue
                             elif payload.get("type") == "error":
@@ -528,6 +546,8 @@ async def run_rollout(req: RolloutRequest):
                         except Exception:
                             pass
                         yield line + "\n\n"
+                    elif line.startswith("CONFIDENCE_DEBUG") or line.startswith("WARNING") or line.startswith("ERROR"):
+                        logger.info("[rollout_ssh] %s", line)
 
                 # Wait for the remote process to fully exit
                 rc = await loop.run_in_executor(None, proc.wait)

@@ -301,12 +301,15 @@ if __name__ == '__main__':
 
     simulator.to(device)
 
-    # Resume from checkpoint if it exists — use domain+arch-specific filename so
-    # training GN / TNS / SAGE never overwrites each other's checkpoints.
-    # Pattern: best_model_{arch}.pth  (e.g. best_model_gn.pth, best_model_tns.pth)
-    # Flag_simple uses: flag_best_model_{arch}.pth
+    # Resume from checkpoint if it exists — use domain+arch+target-specific filename so
+    # training GN / TNS / SAGE and velocity / pressure never overwrites each other's checkpoints.
+    # Pattern: best_model_{arch}.pth           (cylinder_flow velocity)
+    #          best_model_{arch}_pressure.pth  (cylinder_flow pressure)
+    #          flag_best_model_{arch}.pth       (flag_simple)
     if domain == "flag_simple":
         ckpt_filename = f"flag_best_model_{architecture}.pth"
+    elif target_field == "pressure":
+        ckpt_filename = f"best_model_{architecture}_pressure.pth"
     else:
         ckpt_filename = f"best_model_{architecture}.pth"
     checkpoint_path = os.path.join(checkpoint_dir, ckpt_filename)

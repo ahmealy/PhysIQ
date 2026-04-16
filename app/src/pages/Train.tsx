@@ -4,6 +4,7 @@ import { Play, Square, TrendingDown, Target, Clock, Info, Terminal, Database, Se
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export const Train: React.FC = () => {
+  const shortHost = (host: string) => { const l = host.split('.')[0]; const d = l.indexOf('-'); return d >= 0 ? l.slice(d + 1) : l; };
   const [searchParams] = useSearchParams();
   const [domains, setDomains] = useState<Record<string, any>>({});
   const _initDomain = searchParams.get('domain') || 'cylinder_flow';
@@ -672,7 +673,7 @@ export const Train: React.FC = () => {
               </div>
               {remoteEnabled && remote.host && (
                 <p className="text-[10px] text-blue-400/70 text-center">
-                  Training will run on <span className="font-mono">{remote.host.split('.')[0]}:{remote.port}</span>
+                  Training will run on <span className="font-mono">{shortHost(remote.host)}:{remote.port}</span>
                 </p>
               )}
             </div>
@@ -753,7 +754,7 @@ export const Train: React.FC = () => {
                   {remoteActive || (isRunning && remoteEnabled) ? 'Remote GPU' : 'Local CPU'}
                 </p>
                 {(remoteActive || (isRunning && remoteEnabled)) && remote.host && (
-                  <p className="text-[9px] text-blue-500/70 font-mono truncate max-w-[100px]">{remote.host.split('.')[0]}</p>
+                  <p className="text-[9px] text-blue-500/70 font-mono truncate max-w-[100px]">{shortHost(remote.host)}</p>
                 )}
               </div>
             </div>

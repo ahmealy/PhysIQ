@@ -192,7 +192,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
 
 def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std, domain,
                     target_field="velocity", lr_scheduler=None, lr_min=None, warmup_budget=0,
-                    noise_std_cloth: float = 3e-3):
+                    noise_std_cloth: float = 3e-3, clip_gradients: bool = False):
     assert target_field in ("velocity", "pressure"), f"Unknown target_field: {target_field!r}"
     model.train()
     total_loss = 0.0
@@ -238,7 +238,8 @@ def train_one_epoch(model, dataloader, optimizer, transformer, device, noise_std
             _warmup_remaining -= 1
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if clip_gradients:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             # Per-step LR decay (cloth only)
             if lr_scheduler is not None:
@@ -318,7 +319,8 @@ if __name__ == '__main__':
         train_loss, _warmup_budget_remaining = train_one_epoch(
             simulator, train_loader, optimizer, transformer, device, noise_std, domain,
             target_field=target_field, lr_scheduler=lr_scheduler, lr_min=_lr_min,
-            warmup_budget=_warmup_budget_remaining, noise_std_cloth=cfg.get('noise_std_cloth', 3e-3))
+            warmup_budget=_warmup_budget_remaining, noise_std_cloth=cfg.get('noise_std_cloth', 3e-3),
+            clip_gradients=(_arch != 'gn'))
         valid_loss = evaluate(simulator, valid_loader, transformer, device, domain)
 
         print(f"Epoch {epoch}/{num_epochs} Train Loss: {train_loss:.2e} Valid Loss: {valid_loss:.2e}")

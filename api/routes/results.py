@@ -86,12 +86,25 @@ def _read_meta_cheap(fname: str) -> dict:
     return {}
 
 
+_TS_RE = re.compile(r'(\d{8}_\d{6})')
+
+def _file_sort_key(fname: str):
+    """
+    Sort key: timestamp parsed from filename (YYYYMMDD_HHMMSS) → newest first.
+    Falls back to file mtime so old files without a timestamp still sort correctly.
+    """
+    m = _TS_RE.search(fname)
+    if m:
+        return m.group(1)          # lexicographic sort works for YYYYMMDD_HHMMSS
+    # Fallback: convert mtime to same-format string so comparison is consistent
+    mtime = os.path.getmtime(os.path.join(RESULT_DIR, fname))
+    return datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
+
 def _list_pkl_files() -> list[str]:
     if not os.path.exists(RESULT_DIR):
         return []
     files = [f for f in os.listdir(RESULT_DIR) if f.endswith(".pkl")]
-    # Sort newest-first by file creation time
-    files.sort(key=lambda f: os.path.getctime(os.path.join(RESULT_DIR, f)), reverse=True)
+    files.sort(key=_file_sort_key, reverse=True)
     return files
 
 

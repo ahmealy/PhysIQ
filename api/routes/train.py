@@ -4,6 +4,7 @@
 
 import json
 import asyncio
+import math
 import os
 import re
 import shlex
@@ -105,7 +106,17 @@ def _build_ssh_prefix(cfg: dict) -> list[str]:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def _parse_log(log_path: str) -> list[dict]:
+def _safe(v):
+    """Return None for NaN/Inf so JSON serialisation never crashes."""
+    if v is None:
+        return None
+    try:
+        return None if not math.isfinite(float(v)) else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+(log_path: str) -> list[dict]:
     """Parse epoch lines from train.py stdout.
     Format: 'Epoch N/M Train Loss: X.XXe-XX Valid Loss: X.XXe-XX'
     """
@@ -702,7 +713,9 @@ async def train_status():
     epochs = await asyncio.get_running_loop().run_in_executor(
         None, _parse_log, state.train_log_path
     )
-    best = min(epochs, key=lambda e: e["valid_loss"]) if epochs else None
+    # Sanitize NaN/Inf so JSON serialisation never crashes
+    epochs = [{"epoch": e["epoch"], "train_loss": _safe(e["train_loss"]), "valid_loss": _safe(e["valid_loss"])} for e in epochs]
+    best = min((e for e in epochs if e["valid_loss"] is not None), key=lambda e: e["valid_loss"], default=None)
 
     # Read active training config so the UI can sync domain/target/etc on reload
     active_config = None
@@ -785,10 +798,10 @@ async def train_stream():
                     yield "data: %s\n\n" % json.dumps({
                         "type":        "epoch",
                         "epoch":       ep["epoch"],
-                        "train_loss":  ep["train_loss"],
-                        "valid_loss":  ep["valid_loss"],
+                        "train_loss":  _safe(ep["train_loss"]),
+                        "valid_loss":  _safe(ep["valid_loss"]),
                     })
-                    if ep["valid_loss"] < best_loss:
+                    if ep["valid_loss"] is not None and ep["valid_loss"] < best_loss:
                         best_loss = ep["valid_loss"]
                         yield "data: %s\n\n" % json.dumps({
                             "type":       "best",

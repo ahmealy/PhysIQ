@@ -572,39 +572,72 @@ export const Predict: React.FC = () => {
         {/* Right column — results cards at top, then saved rollouts table */}
         <div className="lg:col-span-2 space-y-6">
 
-          {/* Rollout Complete + Performance + Training Similarity — pinned at top of right col */}
-          {rolloutResult && (
-            <div className="space-y-4">
-              {/* Success header + View Results */}
-              <section className="bg-green-600/10 border border-green-500/20 rounded-2xl p-6 space-y-4">
-                <div className="flex items-center gap-2 text-green-400">
-                  <CheckCircle2 className="w-5 h-5" />
-                  <span className="font-bold uppercase tracking-wider text-xs">Rollout Complete</span>
-                  {domain && (
-                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                      domain === "flag_simple"
-                        ? "bg-purple-500/20 text-purple-400"
-                        : "bg-blue-500/20 text-blue-400"
-                    }`}>
-                      {domain === "flag_simple" ? "CLOTH MODEL" : "CFD MODEL"}
-                    </span>
-                  )}
-                  {domain === 'cylinder_flow' && rolloutResult?.target_field && (
-                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                      rolloutResult.target_field === "pressure"
-                        ? "bg-orange-500/20 text-orange-400"
-                        : "bg-cyan-500/20 text-cyan-400"
-                    }`}>
-                      {rolloutResult.target_field === "pressure" ? "PRESSURE" : "VELOCITY"}
-                    </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-[10px] text-slate-500 font-bold uppercase">Elapsed</p>
-                    <p className="text-lg font-bold text-white">{rolloutResult.elapsed_seconds}s</p>
+          {/* Combined result card — shown after rollout completes */}
+          {rolloutResult && (() => {
+            const score: number | null = rolloutResult.confidence_score ?? null;
+            const isGreen = score != null && score >= 0.8;
+            const isAmber = score != null && score >= 0.5 && score < 0.8;
+            const barColor = isGreen ? 'bg-green-500' : isAmber ? 'bg-amber-500' : 'bg-red-500';
+            const simBadge = isGreen
+              ? { label: 'High similarity', cls: 'bg-green-500/20 text-green-400 border-green-500/30' }
+              : isAmber
+                ? { label: 'Partial match',  cls: 'bg-amber-500/20 text-amber-400 border-amber-500/30' }
+                : { label: 'Low similarity', cls: 'bg-red-500/20   text-red-400   border-red-500/30'   };
+            const guidance = isGreen
+              ? 'Well within training distribution — predictions reliable.'
+              : isAmber
+                ? 'Somewhat novel — predictions are estimates, verify critical results.'
+                : 'Differs from training data — consider verifying with a full solver.';
+            return (
+              <section className="bg-green-600/10 border border-green-500/20 rounded-2xl p-4 space-y-3">
+                {/* Header row */}
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2 text-green-400">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span className="font-bold uppercase tracking-wider text-xs">Rollout Complete</span>
+                    {domain && (
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        domain === "flag_simple" ? "bg-purple-500/20 text-purple-400" : "bg-blue-500/20 text-blue-400"
+                      }`}>
+                        {domain === "flag_simple" ? "CLOTH" : "CFD"}
+                      </span>
+                    )}
+                    {domain === 'cylinder_flow' && rolloutResult?.target_field && (
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        rolloutResult.target_field === "pressure" ? "bg-orange-500/20 text-orange-400" : "bg-cyan-500/20 text-cyan-400"
+                      }`}>
+                        {rolloutResult.target_field === "pressure" ? "PRESSURE" : "VELOCITY"}
+                      </span>
+                    )}
                   </div>
+                  <span className="text-xs text-slate-400 font-mono">{rolloutResult.elapsed_seconds}s elapsed</span>
                 </div>
+
+                {/* Similarity row — only if score available */}
+                {score != null && (
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Gauge className="w-3.5 h-3.5 text-slate-500" />
+                      <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Training Similarity</span>
+                    </div>
+                    <div className="flex-1 flex items-center gap-2">
+                      <span className={cn('text-sm font-bold font-mono shrink-0', isGreen ? 'text-green-400' : isAmber ? 'text-amber-400' : 'text-red-400')}>
+                        {(score * 100).toFixed(0)}%
+                      </span>
+                      <div className="flex-1 h-1.5 bg-slate-950 rounded-full overflow-hidden">
+                        <div className={cn('h-full rounded-full transition-all duration-500', barColor)}
+                             style={{ width: `${Math.max(0, score * 100)}%` }} />
+                      </div>
+                      <span className={cn('px-2 py-0.5 rounded-full text-[9px] font-bold uppercase border shrink-0', simBadge.cls)}>
+                        {simBadge.label}
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {score != null && (
+                  <p className="text-[10px] text-slate-500 leading-relaxed">{guidance}</p>
+                )}
+
                 <button
                   onClick={() => navigate(`/visualize?file=${rolloutResult.pkl_path.split('/').pop()}`)}
                   className="w-full py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-2"
@@ -613,91 +646,8 @@ export const Predict: React.FC = () => {
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </section>
-
-              {/* Performance metrics */}
-              {!isRunning && (
-                <section className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Performance Metrics</h3>
-                  <div className="grid grid-cols-3 gap-4">
-                    <MetricCard label="Elapsed" value={`${rolloutResult.elapsed_seconds}s`} />
-                    <MetricCard label="Steps/sec" value={(progressTotal / rolloutResult.elapsed_seconds).toFixed(1)} />
-                    <MetricCard label="GPU Alloc" value={gpuStatus?.mem_alloc_gb != null ? `${gpuStatus.mem_alloc_gb} GB` : '—'} />
-                    <MetricCard label="GPU Resrv" value={gpuStatus?.mem_reserved_gb != null ? `${gpuStatus.mem_reserved_gb} GB` : '—'} />
-                    <MetricCard label="GPU Util" value={gpuStatus?.utilization != null ? `${gpuStatus.utilization}%` : '—'} />
-                  </div>
-                </section>
-              )}
-
-              {/* Training Similarity */}
-              {rolloutResult?.confidence_score != null && (() => {
-                const score: number = rolloutResult.confidence_score;
-                const isGreen  = score >= 0.8;
-                const isAmber  = score >= 0.5 && score < 0.8;
-                const barColor = isGreen ? 'bg-green-500' : isAmber ? 'bg-amber-500' : 'bg-red-500';
-                const badge = isGreen
-                  ? { label: 'High similarity',  cls: 'bg-green-500/20 text-green-400 border-green-500/30' }
-                  : isAmber
-                    ? { label: 'Partial match',   cls: 'bg-amber-500/20 text-amber-400 border-amber-500/30' }
-                    : { label: 'Low similarity',  cls: 'bg-red-500/20   text-red-400   border-red-500/30'   };
-                const guidance = isGreen
-                  ? 'This mesh is well within the training distribution. Predictions should be reliable.'
-                  : isAmber
-                    ? 'This mesh is somewhat novel. Predictions are estimates — verify critical results independently.'
-                    : 'This mesh differs significantly from the training set. Consider verifying with a full CFD solver.';
-                return (
-                  <section className={cn(
-                    'border rounded-2xl p-6 space-y-4',
-                    isGreen ? 'bg-green-900/10 border-green-500/20'
-                    : isAmber ? 'bg-amber-900/10 border-amber-500/20'
-                    : 'bg-red-900/10 border-red-500/20'
-                  )}>
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                        <Gauge className="w-3.5 h-3.5" />
-                        Training Similarity
-                      </h3>
-                      <span className={cn('px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border', badge.cls)}>
-                        {badge.label}
-                      </span>
-                    </div>
-                    <div className="flex items-end gap-4">
-                      <span className={cn('text-4xl font-bold font-mono', isGreen ? 'text-green-400' : isAmber ? 'text-amber-400' : 'text-red-400')}>
-                        {(score * 100).toFixed(0)}<span className="text-xl text-slate-500">%</span>
-                      </span>
-                      <div className="flex-1 pb-1.5">
-                        <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden">
-                          <div className={cn('h-full rounded-full transition-all duration-500', barColor)}
-                               style={{ width: `${Math.max(0, score * 100)}%` }} />
-                        </div>
-                        <div className="relative mt-0.5">
-                          <span className="absolute text-[8px] text-slate-700" style={{ left: '50%', transform: 'translateX(-50%)' }}>50%</span>
-                          <span className="absolute text-[8px] text-slate-700" style={{ left: '80%', transform: 'translateX(-50%)' }}>80%</span>
-                        </div>
-                      </div>
-                    </div>
-                    <p className="text-[10px] text-slate-400 leading-relaxed">{guidance}</p>
-                    <div className="grid grid-cols-3 gap-2 pt-1">
-                      {[
-                        { range: '≥ 80%',  label: 'High similarity', sub: 'Trust predictions',   cls: 'border-green-500/30 bg-green-500/5  text-green-400' },
-                        { range: '50–80%', label: 'Partial match',    sub: 'Estimates — verify', cls: 'border-amber-500/30 bg-amber-500/5  text-amber-400' },
-                        { range: '< 50%',  label: 'Low similarity',   sub: 'Run full FEM/CFD',   cls: 'border-red-500/30   bg-red-500/5    text-red-400'   },
-                      ].map(t => (
-                        <div key={t.range} className={cn('rounded-lg border px-2 py-1.5 text-center', t.cls)}>
-                          <p className="text-[9px] font-bold uppercase">{t.range}</p>
-                          <p className="text-[9px] font-bold mt-0.5">{t.label}</p>
-                          <p className="text-[8px] opacity-70 mt-0.5">{t.sub}</p>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-[9px] text-slate-600 italic">
-                      Computed in the model's latent space: nearest-neighbour distance to training embeddings via compiled KDTree.
-                      Score = 1 − (d_min / training_diameter). Higher = more similar to training data.
-                    </p>
-                  </section>
-                );
-              })()}
-            </div>
-          )}
+            );
+          })()}
 
           {/* Saved rollouts table */}
           <section className="bg-slate-900/50 border border-slate-800 rounded-2xl overflow-hidden">

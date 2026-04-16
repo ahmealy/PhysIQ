@@ -116,7 +116,7 @@ def _safe(v):
         return None
 
 
-(log_path: str) -> list[dict]:
+def _parse_log(log_path: str) -> list[dict]:
     """Parse epoch lines from train.py stdout.
     Format: 'Epoch N/M Train Loss: X.XXe-XX Valid Loss: X.XXe-XX'
     """

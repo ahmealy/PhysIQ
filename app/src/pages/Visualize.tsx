@@ -135,8 +135,8 @@ export const Visualize: React.FC = () => {
       return { label: '✅ Healthy', color: 'bg-green-500/20 text-green-400', desc: 'Train/valid gap is normal' };
     }
     if (rmseData?.growth_ratio != null) {
-      if (rmseData.growth_ratio > 50) return { label: '⚠️ Poor Generalization', color: 'bg-red-500/20 text-red-400', desc: `RMSE grew ${rmseData.growth_ratio.toFixed(0)}× — model may have overfit` };
-      if (rmseData.growth_ratio > 10) return { label: '🟡 Moderate Drift', color: 'bg-yellow-500/20 text-yellow-400', desc: `RMSE grew ${rmseData.growth_ratio.toFixed(1)}× over simulation` };
+      if (rmseData.growth_ratio > 50) return { label: '⚠️ High Error Drift', color: 'bg-red-500/20 text-red-400', desc: `RMSE grew ${rmseData.growth_ratio.toFixed(0)}× — autoregressive errors accumulate rapidly` };
+      if (rmseData.growth_ratio > 10) return { label: '🟡 Moderate Error Drift', color: 'bg-yellow-500/20 text-yellow-400', desc: `RMSE grew ${rmseData.growth_ratio.toFixed(1)}× — normal for long rollouts` };
       return { label: '✅ Stable Rollout', color: 'bg-green-500/20 text-green-400', desc: `RMSE growth ratio: ${rmseData.growth_ratio.toFixed(1)}×` };
     }
     return { label: '— No Data', color: 'bg-slate-800 text-slate-500', desc: 'Run training first to see overfitting analysis' };
@@ -504,17 +504,17 @@ export const Visualize: React.FC = () => {
               <div className="h-48">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={rmseData?.per_step_rmse?.map((v: number, i: number) => ({
-                    t: i * 0.01,
+                    t: rmseData.times?.[i] ?? i * 0.01,
                     rmse: v,
                     mae: rmseData.per_step_mae?.[i] ?? null,
                   }))}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                    <XAxis dataKey="t" stroke="#64748b" fontSize={9} tickFormatter={(v) => `${v.toFixed(1)}s`} />
+                    <XAxis dataKey="t" stroke="#64748b" fontSize={9} tickFormatter={(v) => `${parseFloat(v).toFixed(1)}s`} />
                     <YAxis stroke="#64748b" fontSize={9} tickFormatter={(v) => v.toExponential(1)} />
                     <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b' }} labelFormatter={(v) => `t=${parseFloat(v).toFixed(2)}s`} />
                     <Legend verticalAlign="top" height={24} iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
-                    <Line type="monotone" dataKey="rmse" stroke="#3b82f6" strokeWidth={1.5} dot={false} name="RMSE" />
-                    <Line type="monotone" dataKey="mae"  stroke="#10b981" strokeWidth={2}   dot={false} name="MAE"  />
+                    <Line type="monotone" dataKey="rmse" stroke="#3b82f6" strokeWidth={1.5} dot={false} name="RMSE" connectNulls />
+                    <Line type="monotone" dataKey="mae"  stroke="#10b981" strokeWidth={2}   dot={false} name="MAE"  connectNulls />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -550,33 +550,53 @@ export const Visualize: React.FC = () => {
             </div>
           </section>
 
-          {metadata?.confidence_score != null && (
-            <div className="border border-gray-700 rounded-lg p-4 bg-gray-800/50">
-              <h3 className="font-semibold text-gray-300 mb-2">Training Distribution Confidence</h3>
-              <div className="flex items-center gap-4">
-                <span className={`text-3xl font-bold ${
-                  metadata.confidence_score >= 0.7 ? "text-green-400" :
-                  metadata.confidence_score >= 0.4 ? "text-yellow-400" : "text-red-400"
-                }`}>
-                  {Math.round(metadata.confidence_score * 100)}%
-                </span>
-                <span className={`text-lg font-semibold px-3 py-1 rounded ${
-                  metadata.confidence_score >= 0.7 ? "bg-green-500/20 text-green-400" :
-                  metadata.confidence_score >= 0.4 ? "bg-yellow-500/20 text-yellow-400" :
-                  "bg-red-500/20 text-red-400"
-                }`}>
-                  {metadata.confidence_label ?? (
-                    metadata.confidence_score >= 0.7 ? "HIGH" :
-                    metadata.confidence_score >= 0.4 ? "MEDIUM" : "LOW"
-                  )}
-                </span>
+          {metadata?.confidence_score != null && (() => {
+            const score: number = metadata.confidence_score;
+            const isGreen = score >= 0.8;
+            const isAmber = score >= 0.5 && score < 0.8;
+            const barColor = isGreen ? 'bg-green-500' : isAmber ? 'bg-amber-500' : 'bg-red-500';
+            const badge = isGreen
+              ? { label: 'High similarity',  cls: 'bg-green-500/20 text-green-400 border-green-500/30' }
+              : isAmber
+                ? { label: 'Partial match',  cls: 'bg-amber-500/20 text-amber-400 border-amber-500/30' }
+                : { label: 'Low similarity', cls: 'bg-red-500/20   text-red-400   border-red-500/30'   };
+            const guidance = isGreen
+              ? 'This mesh is well within the training distribution. Predictions should be reliable.'
+              : isAmber
+                ? 'This mesh is somewhat novel. Predictions are estimates — verify critical results independently.'
+                : 'This mesh differs significantly from the training set. Consider verifying with a full CFD solver.';
+            const scoreColor = isGreen ? 'text-green-400' : isAmber ? 'text-amber-400' : 'text-red-400';
+            const sectionCls = isGreen ? 'bg-green-900/10 border-green-500/20' : isAmber ? 'bg-amber-900/10 border-amber-500/20' : 'bg-red-900/10 border-red-500/20';
+            return (
+              <div className={`border rounded-xl p-4 space-y-3 ${sectionCls}`}>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Training Similarity</h3>
+                  <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border ${badge.cls}`}>
+                    {badge.label}
+                  </span>
+                </div>
+                <div className="flex items-end gap-4">
+                  <span className={`text-4xl font-bold font-mono ${scoreColor}`}>
+                    {(score * 100).toFixed(0)}<span className="text-xl text-slate-500">%</span>
+                  </span>
+                  <div className="flex-1 pb-1.5">
+                    <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                           style={{ width: `${Math.max(0, score * 100)}%` }} />
+                    </div>
+                    <div className="relative mt-0.5">
+                      <span className="absolute text-[8px] text-slate-700" style={{ left: '50%', transform: 'translateX(-50%)' }}>50%</span>
+                      <span className="absolute text-[8px] text-slate-700" style={{ left: '80%', transform: 'translateX(-50%)' }}>80%</span>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-400 leading-relaxed">{guidance}</p>
+                <p className="text-[9px] text-slate-600 italic">
+                  Latent-space KDTree score: 1 − (d_min / training_diameter). Higher = more similar to training data.
+                </p>
               </div>
-              <p className="text-xs text-gray-500 mt-2">
-                Measures how similar this test trajectory is to the training distribution,
-                based on nearest-neighbor distance in the model's latent embedding space.
-              </p>
-            </div>
-          )}
+            );
+          })()}
         </div>
       )}
 

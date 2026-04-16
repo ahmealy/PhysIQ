@@ -13,15 +13,12 @@ interface MeshPlotProps {
   domain?: string;
   /** When true, vMax is computed from data instead of using maxVal prop */
   autoScale?: boolean;
-  /** Cylinder obstacle position [cx, cy, radius]. Defaults to [0.2, 0.2, 0.05]. */
-  cylinderPos?: [number, number, number];
 }
 
 export const MeshPlot: React.FC<MeshPlotProps> = ({
   crds, triangles, values, title, minVal, maxVal,
   colorScale: customColorScale, domain,
   autoScale = false,
-  cylinderPos = [0.2, 0.2, 0.05],
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -139,15 +136,6 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
       });
     });
 
-    // Draw cylinder obstacle — only for CFD domain (mocked at x=0.2, y=0.2, r=0.05)
-    if (domain === 'cylinder_flow' || domain == null) {
-      const [cylX, cylY, cylR] = cylinderPos;
-      ctx.fillStyle = '#1e293b';
-      ctx.beginPath();
-      ctx.arc(xScale(cylX), yScale(cylY), (xScale(cylR) - xScale(0)), 0, Math.PI * 2);
-      ctx.fill();
-    }
-
     // Draw colorbar on right side (only when there's enough horizontal space)
     const cbWidth = 12;
     const cbHeight = Math.min(drawHeight * 0.7, 150);
@@ -177,7 +165,7 @@ export const MeshPlot: React.FC<MeshPlotProps> = ({
       ctx.fillText(vMin.toFixed(3), cbX + cbWidth + 3, cbY + cbHeight);
     }
 
-  }, [crds, triangles, values, minVal, maxVal, customColorScale, domain, autoScale, cylinderPos]);
+  }, [crds, triangles, values, minVal, maxVal, customColorScale, domain, autoScale]);
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-900/50 rounded-lg border border-slate-700 overflow-hidden">

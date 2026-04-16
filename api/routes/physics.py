@@ -32,7 +32,7 @@ def _load_pkl_physics(filename: str):
         raise HTTPException(404, "Result file not found: %s" % filename)
     with open(path, "rb") as f:
         data = pickle.load(f)
-    result, crds = data
+    result, crds = data[:2]
     return result[0], result[1], crds   # predicted, targets, crds
 
 

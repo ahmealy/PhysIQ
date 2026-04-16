@@ -118,7 +118,7 @@ export const Generate: React.FC = () => {
     fetch('/api/train/remote').then(r => r.ok ? r.json() : null).then(d => {
       if (d && d.enabled && d.host) {
         setGpuAvailable(true);
-        setRemoteGpuHost(d.host);
+        setRemoteGpuHost(d.host.split('.')[0]);
         setConfig(c => c.device === 'cpu' ? { ...c, device: 'cuda:0' } : c);
       }
     }).catch(() => {});

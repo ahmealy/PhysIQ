@@ -672,7 +672,7 @@ export const Train: React.FC = () => {
               </div>
               {remoteEnabled && remote.host && (
                 <p className="text-[10px] text-blue-400/70 text-center">
-                  Training will run on <span className="font-mono">{remote.host}:{remote.port}</span>
+                  Training will run on <span className="font-mono">{remote.host.split('.')[0]}:{remote.port}</span>
                 </p>
               )}
             </div>
@@ -753,7 +753,7 @@ export const Train: React.FC = () => {
                   {remoteActive || (isRunning && remoteEnabled) ? 'Remote GPU' : 'Local CPU'}
                 </p>
                 {(remoteActive || (isRunning && remoteEnabled)) && remote.host && (
-                  <p className="text-[9px] text-blue-500/70 font-mono truncate max-w-[100px]">{remote.host}</p>
+                  <p className="text-[9px] text-blue-500/70 font-mono truncate max-w-[100px]">{remote.host.split('.')[0]}</p>
                 )}
               </div>
             </div>

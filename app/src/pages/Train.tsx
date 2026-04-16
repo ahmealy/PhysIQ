@@ -133,11 +133,11 @@ export const Train: React.FC = () => {
     es.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'epoch') {
-        const line = `[Epoch ${data.epoch}] train=${data.train_loss.toExponential(3)}  valid=${data.valid_loss.toExponential(3)}`;
+        const line = `[Epoch ${data.epoch}] train=${data.train_loss != null ? data.train_loss.toExponential(3) : 'NaN'}  valid=${data.valid_loss != null ? data.valid_loss.toExponential(3) : 'NaN'}`;
         setEpochs(prev => [...prev, data]);
         setLogLines(prev => [...prev.slice(-200), line]);  // keep last 200 lines
       } else if (data.type === 'best') {
-        setLogLines(prev => [...prev, `  ✓ New best checkpoint — epoch ${data.epoch}, valid=${data.valid_loss.toExponential(3)}`]);
+        setLogLines(prev => [...prev, `  ✓ New best checkpoint — epoch ${data.epoch}, valid=${data.valid_loss != null ? data.valid_loss.toExponential(3) : 'NaN'}`]);
         setBestEpoch(data);
       } else if (data.type === 'done') {
         setLogLines(prev => [...prev, '--- Training complete ---']);
@@ -576,7 +576,7 @@ export const Train: React.FC = () => {
                 <span className="text-xs font-bold uppercase tracking-wider">Best Checkpoint</span>
               </div>
               <div>
-                <p className="text-2xl font-bold text-white font-mono">{bestEpoch.valid_loss.toFixed(6)}</p>
+                <p className="text-2xl font-bold text-white font-mono">{bestEpoch.valid_loss != null ? bestEpoch.valid_loss.toFixed(6) : 'NaN'}</p>
                 <p className="text-xs text-blue-400/70">Epoch {bestEpoch.epoch}</p>
               </div>
             </section>
@@ -739,7 +739,7 @@ export const Train: React.FC = () => {
               <div>
                 <p className="text-[10px] uppercase text-slate-500 font-bold">Current Valid Loss</p>
                 <p className="text-sm font-semibold text-slate-200 font-mono">
-                  {lastEpoch ? lastEpoch.valid_loss.toExponential(3) : '—'}
+                  {lastEpoch ? (lastEpoch.valid_loss != null ? lastEpoch.valid_loss.toExponential(3) : 'NaN') : '—'}
                 </p>
               </div>
             </div>

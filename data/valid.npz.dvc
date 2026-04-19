@@ -1,0 +1,5 @@
+outs:
+- md5: fdb70bdc9b74f997dabdcfb19ee15a90
+  size: 2516916
+  hash: md5
+  path: valid.npz

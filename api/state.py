@@ -166,56 +166,72 @@ def get_orphan_pid() -> Optional[int]:
     return None
 
 # ── Loaded model cache ────────────────────────────────────────────────────────
-# Keyed by (checkpoint_path, device) so we reload only when needed
-_model_cache: dict = {}
+# Keyed by (checkpoint_path, device). Bounded LRU — evicts least-recently-used
+# entry when capacity is exceeded so we don't accumulate all loaded models in RAM.
+# Capacity: 3 models (covers GN velocity + GN pressure + TNS simultaneously).
+from collections import OrderedDict
+
+_MODEL_CACHE_MAX = 3
+_model_cache: OrderedDict = OrderedDict()
 _model_cache_lock = threading.Lock()
 
 
 def get_model(checkpoint_path: str, device: str):
     """
     Load and cache the correct Simulator based on checkpoint metadata.
-    Thread-safe via double-checked locking.
+    Thread-safe LRU cache — evicts oldest entry when capacity (_MODEL_CACHE_MAX) is exceeded.
     """
     key = (checkpoint_path, device)
-    # Fast path — no lock needed if already cached
-    if key in _model_cache:
-        return _model_cache[key]
     with _model_cache_lock:
-        # Second check inside the lock (another thread may have populated it)
-        if key not in _model_cache:
-            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            domain = ckpt.get("domain", "cylinder_flow")
+        if key in _model_cache:
+            # Move to end (most recently used)
+            _model_cache.move_to_end(key)
+            return _model_cache[key]
 
-            if domain == "flag_simple":
-                from model.flag_simulator import FlagSimulator
-                sim = FlagSimulator(
-                    message_passing_num=ckpt.get("message_passing_num", 15),
-                    device=device,
-                )
-            else:
-                from model.simulator import Simulator
-                node_input_size      = ckpt.get("node_input_size", 11)
-                edge_input_size      = ckpt.get("edge_input_size", 3)
-                target_field         = ckpt.get("target_field", "velocity")
-                architecture         = ckpt.get("architecture", "gn")
-                tns_heads            = ckpt.get("tns_heads", 4)
-                sage_aggr            = ckpt.get("sage_aggr", "mean")
-                sage_normalize       = ckpt.get("sage_normalize", True)
-                sim = Simulator(
-                    message_passing_num=ckpt.get("message_passing_num", 15),
-                    node_input_size=node_input_size,
-                    edge_input_size=edge_input_size,
-                    device=device,
-                    target_field=target_field,
-                    architecture=architecture,
-                    tns_heads=tns_heads,
-                    sage_aggr=sage_aggr,
-                    sage_normalize=sage_normalize,
-                )
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        domain = ckpt.get("domain", "cylinder_flow")
 
-            sim.load_state_dict(ckpt["model_state_dict"])
-            sim.eval()
-            _model_cache[key] = sim
+        if domain == "flag_simple":
+            from model.flag_simulator import FlagSimulator
+            sim = FlagSimulator(
+                message_passing_num=ckpt.get("message_passing_num", 15),
+                device=device,
+            )
+        else:
+            from model.simulator import Simulator
+            node_input_size      = ckpt.get("node_input_size", 11)
+            edge_input_size      = ckpt.get("edge_input_size", 3)
+            target_field         = ckpt.get("target_field", "velocity")
+            architecture         = ckpt.get("architecture", "gn")
+            tns_heads            = ckpt.get("tns_heads", 4)
+            sage_aggr            = ckpt.get("sage_aggr", "mean")
+            sage_normalize       = ckpt.get("sage_normalize", True)
+            sim = Simulator(
+                message_passing_num=ckpt.get("message_passing_num", 15),
+                node_input_size=node_input_size,
+                edge_input_size=edge_input_size,
+                device=device,
+                target_field=target_field,
+                architecture=architecture,
+                tns_heads=tns_heads,
+                sage_aggr=sage_aggr,
+                sage_normalize=sage_normalize,
+            )
+
+        sim.load_state_dict(ckpt["model_state_dict"])
+        sim.eval()
+
+        _model_cache[key] = sim
+        _model_cache.move_to_end(key)
+
+        # Evict LRU entry if over capacity
+        if len(_model_cache) > _MODEL_CACHE_MAX:
+            evicted_key, _ = _model_cache.popitem(last=False)
+            import logging
+            logging.getLogger(__name__).info(
+                "Model cache full — evicted %s", evicted_key[0]
+            )
+
     return _model_cache[key]
 
 

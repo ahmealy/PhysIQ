@@ -1,0 +1,5 @@
+outs:
+- md5: e15c34846ecf708ba9d44972052169e9
+  size: 904977600
+  hash: md5
+  path: valid.dat

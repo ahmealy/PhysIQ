@@ -143,3 +143,10 @@ if __name__ == '__main__':
                             all_velocity_shape=(shape0, shape1, 2),
                             all_pressure_shape=(shape0, shape1, 1)
         )
+
+        # Write sentinel files to signal clean completion.
+        # dataset/fpc.py checks for these before opening memmaps — a missing
+        # sentinel means the parse was interrupted and the .dat file is partial.
+        open(os.path.join(tf_datasetPath, split + '.dat.ok'), 'w').close()
+        open(os.path.join(tf_datasetPath, split + '_pressure.dat.ok'), 'w').close()
+        print(f"[parse] {split}: sentinel files written — parse complete.")

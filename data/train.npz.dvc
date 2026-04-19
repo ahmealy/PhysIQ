@@ -1,0 +1,5 @@
+outs:
+- md5: 534ea017ce79734757c24c7191a6c6d7
+  size: 25160509
+  hash: md5
+  path: train.npz

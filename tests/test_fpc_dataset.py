@@ -44,6 +44,11 @@ def _make_fake_cfd_data(data_dir: str, n_traj: int = 2, T: int = 5, N: int = 10,
         all_velocity_shape=(shape0, T, 2),
         all_pressure_shape=(shape0, T, 1),
     )
+
+    # Write sentinel files (parse_tfrecord.py writes these on clean completion)
+    open(os.path.join(data_dir, "train.dat.ok"), "w").close()
+    open(os.path.join(data_dir, "train_pressure.dat.ok"), "w").close()
+
     return shape0, T, N, F
 
 
@@ -87,6 +92,7 @@ def test_pressure_missing_dat_raises(tmp_path):
     data_dir = str(tmp_path)
     _make_fake_cfd_data(data_dir)
     os.remove(os.path.join(data_dir, "train_pressure.dat"))
+    os.remove(os.path.join(data_dir, "train_pressure.dat.ok"))
     from dataset.fpc import FpcDataset
     with pytest.raises(FileNotFoundError, match="pressure"):
         FpcDataset(data_root=data_dir, split="train", target_field="pressure")

@@ -1,0 +1,5 @@
+outs:
+- md5: a636e1ec34a81b470ad2b4c9039f88cb
+  size: 9053712000
+  hash: md5
+  path: train.dat

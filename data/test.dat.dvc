@@ -1,0 +1,5 @@
+outs:
+- md5: 434442880288fbfeeb61209ce2f4f932
+  size: 899265600
+  hash: md5
+  path: test.dat

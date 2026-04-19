@@ -295,9 +295,9 @@ if __name__ == '__main__':
                                    target_field=target_field)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=2, pin_memory=False)
+                              num_workers=4, pin_memory=True)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False,
-                              num_workers=2, pin_memory=False)
+                              num_workers=2, pin_memory=True)
 
     simulator.to(device)
 

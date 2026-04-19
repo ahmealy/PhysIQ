@@ -26,6 +26,7 @@ class FpcDataset(Dataset):
         self.meta = {key: tmp[key] for key in meta_keys}
 
         vel_shape = self.meta["all_velocity_shape"]
+        self._check_sentinel(data_path, "velocity")
         self.fp = np.memmap(data_path, dtype="float32", mode="r", shape=vel_shape)
 
         # Pressure field (optional)
@@ -37,6 +38,7 @@ class FpcDataset(Dataset):
                     "Pressure data not found: %s\n"
                     "Re-run parse_tfrecord.py to extract the pressure field." % pressure_path
                 )
+            self._check_sentinel(pressure_path, "pressure")
             pressure_shape = (vel_shape[0], vel_shape[1], 1)
             self.fp_pressure = np.memmap(pressure_path, dtype="float32", mode="r",
                                          shape=pressure_shape)
@@ -79,3 +81,14 @@ class FpcDataset(Dataset):
 
     def __len__(self) -> int:
         return self.total_samples
+
+    @staticmethod
+    def _check_sentinel(dat_path: str, field: str) -> None:
+        """Raise if the .dat.ok sentinel is missing, indicating a partial/interrupted parse."""
+        sentinel = dat_path + ".ok"
+        if not os.path.exists(sentinel):
+            raise RuntimeError(
+                f"Missing parse sentinel: {sentinel}\n"
+                f"The {field} .dat file may be incomplete (parse_tfrecord.py was interrupted).\n"
+                "Re-run parse_tfrecord.py to regenerate the data files."
+            )

@@ -1,5 +1,7 @@
 data/**
 !data/*.py
+!data/*.dvc
+!data/.gitignore
 checkpoints/
 .marscode/
 *.pyc
@@ -32,6 +34,7 @@ docs/*
 !docs/superpowers/**
 !docs/demo/
 !docs/demo/**
+!docs/DATA_PIPELINE_UPGRADE_PLAN.md
 
 # Dataset metadata
 meta.json

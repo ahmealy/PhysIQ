@@ -16,6 +16,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from scipy.spatial import cKDTree
 
+from physics.poisson_pressure import PoissonPressureCorrector
 from storage.factory import get_repository
 
 router = APIRouter(prefix="/results")
@@ -223,4 +224,68 @@ def get_physics(filename: str, t: int = 0):
         # Divergence proxy series (length T each) — ≈0 for incompressible flow
         "divergence_pred":      div_pred,
         "divergence_target":    div_target,
+    }
+
+
+# ── Helmholtz correction endpoint ────────────────────────────────────────────
+
+def _build_correction_edges(crds: np.ndarray, k: int = 7) -> np.ndarray:
+    """Build k-NN edges for PoissonPressureCorrector (undirected, i < j)."""
+    return PoissonPressureCorrector._build_knn_edges(crds, k)
+
+
+@router.get("/{filename}/physics/corrected_divergence")
+def get_corrected_divergence(filename: str):
+    """
+    Apply Helmholtz pressure projection to the predicted velocity field and return:
+    - divergence_before: RMS divergence per sampled timestep (raw GNN output)
+    - divergence_after:  RMS divergence per sampled timestep (after Poisson correction)
+    - divergence_reduction_pct: percentage reduction in mean divergence
+    - correction_norm: mean ||v_corrected - v_pred|| per sampled timestep
+
+    Uses sparse LU factorisation cached per mesh — first call ~0.5s, subsequent calls fast.
+    Samples every 10 timesteps for performance (matches existing divergence series pattern).
+    """
+    predicted, targets, crds = _load_pkl_physics(filename)
+    T, N, _ = predicted.shape
+
+    crds_f64 = crds.astype(np.float64)
+    corrector = PoissonPressureCorrector(crds_f64, edges=None, k_neighbors=_K_NEIGHBORS)
+
+    sample_ts = list(range(0, T, 10))
+    div_before = []
+    div_after  = []
+    corr_norms = []
+
+    for t in sample_ts:
+        vel = predicted[t].astype(np.float64)
+        rms_before = corrector.divergence_rms(vel)
+        vel_corr   = corrector.correct(vel)
+        rms_after  = corrector.divergence_rms(vel_corr)
+        diff_norm  = float(np.mean(np.linalg.norm(vel_corr - vel, axis=-1)))
+        div_before.append(rms_before)
+        div_after.append(rms_after)
+        corr_norms.append(diff_norm)
+
+    mean_before = float(np.mean(div_before))
+    mean_after  = float(np.mean(div_after))
+    reduction_pct = (
+        100.0 * (mean_before - mean_after) / mean_before
+        if mean_before > 0 else 0.0
+    )
+
+    # Interpolate back to full T length for frontend compatibility
+    all_ts = np.arange(T)
+    div_before_full = np.interp(all_ts, sample_ts, div_before).tolist()
+    div_after_full  = np.interp(all_ts, sample_ts, div_after).tolist()
+    corr_norm_full  = np.interp(all_ts, sample_ts, corr_norms).tolist()
+
+    return {
+        "filename":                filename,
+        "num_nodes":               N,
+        "timesteps":               T,
+        "divergence_before":       div_before_full,
+        "divergence_after":        div_after_full,
+        "divergence_reduction_pct": round(reduction_pct, 2),
+        "correction_norm":         corr_norm_full,
     }

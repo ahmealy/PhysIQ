@@ -46,3 +46,5 @@ confidence/build/*
 
 # Git worktrees
 .worktrees/
+!docs/technical/
+!docs/technical/**

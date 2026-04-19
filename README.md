@@ -67,6 +67,52 @@ API docs at `http://localhost:8000/docs`.
 
 ---
 
+## Docker
+
+The quickest way to run PhysIQ without setting up Python/Node dependencies manually.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) + [Docker Compose](https://docs.docker.com/compose/)
+- Data already parsed (`.dat` files in `data/`) — parsing requires TensorFlow 1.x, do this on the host first
+
+### Production (API + frontend via nginx)
+
+```bash
+docker compose up --build
+```
+
+- Frontend → http://localhost:80
+- API docs → http://localhost:8000/docs
+
+### Development (hot reload)
+
+```bash
+# API with hot reload + dev frontend (Vite HMR)
+docker compose --profile dev up --build
+```
+
+- Frontend (Vite) → http://localhost:5173
+- API → http://localhost:8000
+
+### Volumes
+
+Data, checkpoints, and results are mounted from the host — they persist across container restarts and are accessible from both host and container:
+
+| Host path | Container path | Purpose |
+|---|---|---|
+| `./data` | `/app/data` | CFD dataset (.dat memmap files) |
+| `./data_flag` | `/app/data_flag` | Cloth dataset |
+| `./checkpoints` | `/app/checkpoints` | Trained model checkpoints |
+| `./result` | `/app/result` | Rollout result PKL/HDF5 files |
+| `./runs` | `/app/runs` | Training logs, configs, embedding index |
+
+### GPU note
+
+The Docker containers use **CPU-only PyTorch**. GPU training/inference uses the existing SSH remote GPU feature — configure it in Train → Remote GPU as usual. The API container handles data management and serves results; the heavy compute stays on your GPU machine.
+
+---
+
 ## Remote GPU
 
 Training and inference can be offloaded to a remote GPU over SSH. Configure it in **Train → Remote GPU**, or create the config manually:

@@ -1,0 +1,16 @@
+venv/
+venv_tf/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+app/node_modules/
+data/*.tfrecord
+data_160426/
+*.dat
+*.npz
+result/*.pkl
+result/*.h5
+runs/embedding_index*.pkl
+.dvc/
+*.dvc

@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: physiq-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount data/checkpoints/results as volumes so they persist and are shared with host
+      - ./data:/app/data
+      - ./data_flag:/app/data_flag
+      - ./checkpoints:/app/checkpoints
+      - ./result:/app/result
+      - ./runs:/app/runs
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+    container_name: physiq-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Dev frontend (optional — hot reload, useful during development)
+  frontend-dev:
+    image: node:20-alpine
+    container_name: physiq-frontend-dev
+    working_dir: /app
+    volumes:
+      - ./app:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    command: sh -c "npm install && npm run dev -- --host"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    profiles:
+      - dev   # only starts with: docker compose --profile dev up

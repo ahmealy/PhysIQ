@@ -53,7 +53,8 @@ def rollout_error(predicteds, targets, rollout_index=0, save_dir='result'):
 
 
 @torch.no_grad()
-def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
+def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0',
+            poisson_correction=False):
     """
     Autoregressive rollout for a single trajectory.
 
@@ -77,6 +78,14 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
     boundary_mask = None
     predicteds = []
     targets = []
+
+    # Initialise Poisson corrector once (one-time LU factorisation) before the loop
+    corrector = None
+    if poisson_correction:
+        from physics.poisson_pressure import PoissonPressureCorrector
+        crds_init = _raw_graph.pos.numpy()  # [N, 2]
+        corrector = PoissonPressureCorrector(crds_init)
+        print('Poisson pressure corrector initialised (LU factorised)')
 
     t_start = time.perf_counter()
 
@@ -107,6 +116,12 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
 
         predicted_velocity = model(graph, velocity_sequence_noise=None)
 
+        # Apply Poisson pressure correction before boundary pin (CFD only, opt-in)
+        if corrector is not None:
+            vel_np = predicted_velocity.detach().cpu().numpy()  # [N, 2]
+            vel_np = corrector.correct(vel_np)
+            predicted_velocity = torch.from_numpy(vel_np).to(predicted_velocity.device)
+
         # Pin boundary nodes back to ground truth
         predicted_velocity[boundary_mask] = graph.y[boundary_mask]
 
@@ -129,11 +144,12 @@ def rollout(model, dataset, transformer, rollout_index=0, device='cuda:0'):
     pkl_path = 'result/result_traj%d_%s.pkl' % (rollout_index, ts)
     with open(pkl_path, 'wb') as f:
         pickle.dump([result, crds, {
-            "domain":          "cylinder_flow",
-            "target_field":    "velocity",
-            "faces":           _faces,
-            "speedup":         round((n_steps * 0.01) / elapsed, 2),
-            "elapsed_seconds": round(elapsed, 3),
+            "domain":             "cylinder_flow",
+            "target_field":       "velocity",
+            "faces":              _faces,
+            "speedup":            round((n_steps * 0.01) / elapsed, 2),
+            "elapsed_seconds":    round(elapsed, 3),
+            "poisson_correction": poisson_correction,
         }], f)
     print('Result saved to %s' % pkl_path)
 
@@ -218,6 +234,8 @@ if __name__ == '__main__':
     parser.add_argument('--rollout_num', type=int,  default=1)
     parser.add_argument('--domain', type=str, default='cylinder_flow',
                         choices=['cylinder_flow', 'flag_simple'])
+    parser.add_argument('--poisson_correction', action='store_true',
+                        help='Apply Helmholtz pressure projection after each GNN step (CFD only)')
     args = parser.parse_args()
 
     device = 'cuda:%d' % args.gpu if torch.cuda.is_available() else 'cpu'
@@ -262,7 +280,8 @@ if __name__ == '__main__':
         for i in range(args.rollout_num):
             print('\n' + '='*60)
             result, crds, elapsed = rollout(simulator, dataset, transformer,
-                                            rollout_index=i, device=device)
+                                            rollout_index=i, device=device,
+                                            poisson_correction=args.poisson_correction)
             n_steps = result[0].shape[0]
             sim_time = n_steps * 0.01   # dt = 0.01s per step
             print('\nInference: %d steps in %.2fs  (%.1fx faster than real-time sim)' % (

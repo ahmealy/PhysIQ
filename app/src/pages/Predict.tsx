@@ -27,6 +27,7 @@ export const Predict: React.FC = () => {
   const [gpuStatus, setGpuStatus] = useState<any>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [remoteConfig, setRemoteConfig] = useState<{ enabled: boolean; host: string } | null>(null);
+  const [poissonCorrection, setPoissonCorrection] = useState(false);
   // Rollout phase — persists after completion so status bar stays visible
   const [rolloutPhase, setRolloutPhase] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   // Elapsed timer for active rollout
@@ -209,6 +210,7 @@ export const Predict: React.FC = () => {
           domain: domain,
           trajectory_index: trajectoryIndex,
           device: device,
+          poisson_correction: poissonCorrection,
           ...(selectedCheckpoint ? { checkpoint: selectedCheckpoint } : {}),
         }),
       });
@@ -491,6 +493,23 @@ export const Predict: React.FC = () => {
                 </div>
               )}
 
+              {/* Poisson pressure correction toggle — CFD only */}
+              {domain === 'cylinder_flow' && (
+                <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={poissonCorrection}
+                    onChange={e => setPoissonCorrection(e.target.checked)}
+                    className="w-4 h-4 accent-indigo-500"
+                  />
+                  <span>Poisson pressure correction</span>
+                  <span
+                    title="Applies Helmholtz projection after each GNN step to enforce ∇·v = 0 (divergence-free). Adds ~2–7ms per step. Reduces long-rollout drift."
+                    className="text-slate-500 hover:text-slate-300 cursor-help"
+                  >ⓘ</span>
+                </label>
+              )}
+
               <button
                 onClick={handleStartRollout}
                 disabled={isRunning || checkpointLoading || !checkpoint}
@@ -607,6 +626,11 @@ export const Predict: React.FC = () => {
                         rolloutResult.target_field === "pressure" ? "bg-orange-500/20 text-orange-400" : "bg-cyan-500/20 text-cyan-400"
                       }`}>
                         {rolloutResult.target_field === "pressure" ? "PRESSURE" : "VELOCITY"}
+                      </span>
+                    )}
+                    {poissonCorrection && (
+                      <span className="text-xs px-2 py-0.5 rounded bg-indigo-900/50 text-indigo-300 border border-indigo-700">
+                        Poisson corrected
                       </span>
                     )}
                   </div>

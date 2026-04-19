@@ -71,6 +71,14 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
     _raw_graph = dataset[traj_idx * n_steps]
     faces = _raw_graph.face.numpy().T.astype(np.int32)  # [F, 3]
 
+    # Initialise Poisson corrector once before the loop (opt-in, CFD only)
+    corrector = None
+    if req.get("poisson_correction", False):
+        from physics.poisson_pressure import PoissonPressureCorrector
+        crds_init = _raw_graph.pos.numpy()  # [N, 2]
+        corrector = PoissonPressureCorrector(crds_init)
+        print("Poisson pressure corrector initialised (LU factorised)", flush=True)
+
     predicted_velocity = None
     boundary_mask = None
     predicteds, targets_list = [], []
@@ -102,6 +110,13 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
 
             next_v = graph.y
             predicted_velocity = model(graph, velocity_sequence_noise=None)
+
+            # Apply Poisson pressure correction before boundary pin (opt-in)
+            if corrector is not None:
+                vel_np = predicted_velocity.detach().cpu().numpy()  # [N, 2]
+                vel_np = corrector.correct(vel_np)
+                predicted_velocity = torch.from_numpy(vel_np).to(predicted_velocity.device)
+
             predicted_velocity[boundary_mask] = next_v[boundary_mask]
 
             # predicteds[t] = autoregressive input at t  (matches DeepMind trajectory[t])
@@ -125,40 +140,55 @@ def _run_rollout(cfg: dict, req: dict) -> dict:
 
     # Confidence score — requires domain-scoped embedding_index built after training
     confidence_score = None
+    _confidence_debug = ""
     _domain_slug = domain.replace("_", "")  # cylinderflow, flagsimple
     index_path = os.path.join("runs", "embedding_index_%s.pkl" % _domain_slug)
+    _confidence_debug += "cwd=%s index=%s exists=%s" % (os.getcwd(), index_path, os.path.exists(index_path))
     if os.path.exists(index_path):
         try:
-            from confidence.index import NearestNeighborIndex
+            from confidence.index import NearestNeighborIndex, IndexStaleError
             from model.embedding import extract_embedding
 
-            _index = NearestNeighborIndex.load(index_path)
-            _first_graph = dataset[traj_idx * n_steps]
-            _first_graph = transformer(_first_graph)
-            _emb = extract_embedding(model, _first_graph, device=device)
+            _index = NearestNeighborIndex.load(
+                index_path, expected_checkpoint=checkpoint_path)
+            # Dual-frame embedding: concat(frame_0, frame_warmup)
+            # frame_0    → geometry + boundary conditions
+            # frame_warmup → early flow dynamics
+            _warmup = min(5, n_steps - 1)
+            _g0 = dataset[traj_idx * n_steps]
+            _gw = dataset[traj_idx * n_steps + _warmup]
+            _g0 = transformer(_g0)
+            _gw = transformer(_gw)
+            _emb = extract_embedding(model, _g0, device=device, graph_warmup=_gw)
             confidence_score = float(_index.query(_emb))
-        except Exception:
-            pass  # confidence is optional — never block the rollout
+            _confidence_debug += " frame=0+%d emb_norm=%.4f diameter=%.4f score=%.4f" % (
+                _warmup, float((_emb ** 2).sum() ** 0.5), _index.train_diameter, confidence_score)
+        except IndexStaleError as _ce:
+            _confidence_debug += " STALE_INDEX=%s" % _ce
+        except Exception as _ce:
+            _confidence_debug += " ERROR=%s" % _ce
 
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/result_traj%d_%s.pkl" % (traj_idx, _ts())
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], crds, {
-            "domain":           domain,
-            "target_field":     target_field,
-            "confidence_score": confidence_score,
-            "faces":            faces,
-            "speedup":          round(speedup, 2),
-            "elapsed_seconds":  round(elapsed, 3),
+            "domain":             domain,
+            "target_field":       target_field,
+            "confidence_score":   confidence_score,
+            "faces":              faces,
+            "speedup":            round(speedup, 2),
+            "elapsed_seconds":    round(elapsed, 3),
+            "poisson_correction": req.get("poisson_correction", False),
         }], f)
 
     return {
-        "elapsed_seconds": round(elapsed, 3),
-        "speedup":         round(speedup, 2),
-        "pkl_path":        pkl_path,
-        "rmse_final":      float(per_step_rmse[-1]),
-        "similarity_score": None,
-        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
+        "elapsed_seconds":   round(elapsed, 3),
+        "speedup":           round(speedup, 2),
+        "pkl_path":          pkl_path,
+        "rmse_final":        float(per_step_rmse[-1]),
+        "similarity_score":  None,
+        "confidence_score":  round(confidence_score, 3) if confidence_score is not None else None,
+        "_confidence_debug": _confidence_debug,
     }
 
 
@@ -231,19 +261,28 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
 
     # Confidence score — requires domain-scoped embedding_index built after training
     confidence_score = None
+    _confidence_debug = ""
     index_path = os.path.join("runs", "embedding_index_flagsimple.pkl")
+    _confidence_debug += "cwd=%s index=%s exists=%s" % (os.getcwd(), index_path, os.path.exists(index_path))
     if os.path.exists(index_path):
         try:
-            from confidence.index import NearestNeighborIndex
+            from confidence.index import NearestNeighborIndex, IndexStaleError
             from model.embedding import extract_embedding
 
-            _index = NearestNeighborIndex.load(index_path)
+            _cloth_ckpt = domain_cfg.get("checkpoint", "")
+            _index = NearestNeighborIndex.load(
+                index_path, expected_checkpoint=_cloth_ckpt)
+            # Cloth frame 0 IS the design (world_pos at t=0) — correct to use it
             _first_idx = int(dataset._cum_steps[traj_idx])
             _first_graph = dataset[_first_idx]
             _emb = extract_embedding(model, _first_graph, device=device)
             confidence_score = float(_index.query(_emb))
-        except Exception:
-            pass  # confidence is optional — never block the rollout
+            _confidence_debug += " emb_norm=%.4f diameter=%.4f score=%.4f" % (
+                float((_emb ** 2).sum() ** 0.5), _index.train_diameter, confidence_score)
+        except IndexStaleError as _ce:
+            _confidence_debug += " STALE_INDEX=%s" % _ce
+        except Exception as _ce:
+            _confidence_debug += " ERROR=%s" % _ce
 
     os.makedirs("result", exist_ok=True)
     pkl_path = "result/flag_result_traj%d_%s.pkl" % (traj_idx, _ts())
@@ -258,12 +297,13 @@ def _run_cloth_rollout(cfg: dict, req: dict) -> dict:
         }], f)
 
     return {
-        "elapsed_seconds": round(elapsed, 3),
-        "speedup":         round(speedup, 2),
-        "pkl_path":        pkl_path,
-        "rmse_final":      float(per_step_rmse[-1]),
-        "similarity_score": None,
-        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
+        "elapsed_seconds":   round(elapsed, 3),
+        "speedup":           round(speedup, 2),
+        "pkl_path":          pkl_path,
+        "rmse_final":        float(per_step_rmse[-1]),
+        "similarity_score":  None,
+        "confidence_score":  round(confidence_score, 3) if confidence_score is not None else None,
+        "_confidence_debug": _confidence_debug,
     }
 
 

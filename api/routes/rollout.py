@@ -67,11 +67,12 @@ def _get_cloth_dataset(data_dir: str, split: str):
 
 
 class RolloutRequest(BaseModel):
-    domain:            str = "cylinder_flow"
-    trajectory_index:  int = 0
-    split:             str = "test"
-    device:            str = "cuda:0"
-    checkpoint:        str = ""   # optional override; empty string → use DOMAINS default
+    domain:             str  = "cylinder_flow"
+    trajectory_index:   int  = 0
+    split:              str  = "test"
+    device:             str  = "cuda:0"
+    checkpoint:         str  = ""    # optional override; empty string → use DOMAINS default
+    poisson_correction: bool = False  # Helmholtz projection after each GNN step (CFD only)
 
 
 def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
@@ -109,6 +110,14 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     boundary_mask = None
     predicteds, targets_list = [], []
 
+    # Initialise Poisson corrector once (one-time LU factorisation) before the loop
+    corrector = None
+    if req.poisson_correction and req.domain == "cylinder_flow":
+        from physics.poisson_pressure import PoissonPressureCorrector
+        crds_init = _raw_graph.pos.numpy()  # [N, 2]
+        corrector = PoissonPressureCorrector(crds_init)
+        logger.info("Poisson pressure corrector initialised (LU factorised)")
+
     t_start = time.perf_counter()
 
     with torch.no_grad():
@@ -140,6 +149,13 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
             rollout_velocity_t = graph.x[:, field_slice].detach().cpu().numpy()
 
             predicted_velocity = model(graph, velocity_sequence_noise=None)
+
+            # Apply Poisson pressure correction before boundary pin (CFD only, opt-in)
+            if corrector is not None:
+                vel_np = predicted_velocity.detach().cpu().numpy()  # [N, 2]
+                vel_np = corrector.correct(vel_np)
+                predicted_velocity = torch.from_numpy(vel_np).to(predicted_velocity.device)
+
             predicted_velocity[boundary_mask] = graph.y[boundary_mask]
 
             # predicteds[t] = autoregressive input velocity at t  (matches DeepMind trajectory[t])
@@ -243,21 +259,23 @@ def _run_rollout_sync(req: RolloutRequest, cfg: dict, device: str,
     pkl_path = "result/result_traj%d_%s.pkl" % (req.trajectory_index, _ts())
     with open(pkl_path, "wb") as f:
         pickle.dump([[predicted_arr, targets_arr], crds, {
-            "domain":            req.domain,
-            "target_field":      target_field,
-            "confidence_score":  confidence_score,
-            "faces":             faces,
-            "speedup":           round(speedup, 2),
-            "elapsed_seconds":   round(elapsed, 3),
+            "domain":             req.domain,
+            "target_field":       target_field,
+            "confidence_score":   confidence_score,
+            "faces":              faces,
+            "speedup":            round(speedup, 2),
+            "elapsed_seconds":    round(elapsed, 3),
+            "poisson_correction": req.poisson_correction,
         }], f)
 
     return {
-        "elapsed_seconds":  round(elapsed, 3),
-        "speedup":          round(speedup, 2),
-        "pkl_path":         pkl_path,
-        "rmse_final":       float(per_step_rmse[-1]),
-        "similarity_score": round(similarity_score, 3) if similarity_score is not None else None,
-        "confidence_score": round(confidence_score, 3) if confidence_score is not None else None,
+        "elapsed_seconds":   round(elapsed, 3),
+        "speedup":           round(speedup, 2),
+        "pkl_path":          pkl_path,
+        "rmse_final":        float(per_step_rmse[-1]),
+        "similarity_score":  round(similarity_score, 3) if similarity_score is not None else None,
+        "confidence_score":  round(confidence_score, 3) if confidence_score is not None else None,
+        "poisson_correction": req.poisson_correction,
     }
 
 
@@ -486,10 +504,11 @@ async def run_rollout(req: RolloutRequest):
         rollout_cfg_path = os.path.join(project_root, "runs", "ui_rollout_config.json")
         with open(rollout_cfg_path, "w") as f:
             json.dump({
-                "domain":            req.domain,
-                "trajectory_index":  req.trajectory_index,
-                "split":             req.split,
-                "device":            "cuda:0",  # always use GPU on remote host
+                "domain":             req.domain,
+                "trajectory_index":   req.trajectory_index,
+                "split":              req.split,
+                "device":             "cuda:0",  # always use GPU on remote host
+                "poisson_correction": req.poisson_correction,
             }, f)
 
         venv_py    = remote_cfg.get("venv_python", "/home/ahmealy/.pyenv/versions/venv_gpu/bin/python").strip()

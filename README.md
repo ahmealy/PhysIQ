@@ -38,8 +38,11 @@ cd app && npm install
 aria2c -x 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/train.tfrecord -d data
 aria2c -x 8 https://storage.googleapis.com/dm-meshgraphnets/cylinder_flow/test.tfrecord  -d data
 
-# Parse to PyTorch format
+# Parse to PyTorch memmap format (writes .dat.ok sentinel files on completion)
 python parse_tfrecord.py
+
+# To also parse pressure fields (needed for pressure-target training):
+python parse_tfrecord.py  # creates train_pressure.dat, valid_pressure.dat, test_pressure.dat
 ```
 
 ### 3. Train
@@ -106,9 +109,11 @@ Browser (Vite dev server :5173)
 ```
 
 The GNN follows the encoder–processor–decoder pattern from [MeshGraphNets (Pfaff et al., ICLR 2021)](https://arxiv.org/abs/2010.03409), extended with:
-- **TNS** (Transformer-based) and **SAGE** (GraphSAGE) processor variants
-- CVAE-based inverse design with Latin Hypercube sampling
+- **TNS** (Transformer-based) and **SAGE** (GraphSAGE) processor variants selectable per training run
+- CVAE-based inverse design with Latin Hypercube sampling and gradient-descent optimisation
 - Compiled C++ KDTree for latent-space similarity scoring
+- Gradient clipping for TNS/SAGE to prevent attention-layer explosion (GN unchanged)
+- LRU model cache (max 3) to avoid repeated checkpoint deserialization
 
 ---
 
@@ -120,15 +125,70 @@ The GNN follows the encoder–processor–decoder pattern from [MeshGraphNets (P
 
 ---
 
+## Data pipeline
+
+### Parse & train (first time setup)
+
+```bash
+# Parse TFRecord → .dat memmap (writes sentinel files on success)
+python parse_tfrecord.py
+
+# Optional: track data files with DVC
+dvc add data/train.dat data/valid.dat data/test.dat
+```
+
+### Storage backends
+
+Results are stored as `.pkl` by default. Switch to compressed HDF5 with partial-timestep reads:
+
+```bash
+# Create config
+mkdir -p runs
+echo '{"result_backend": "hdf5"}' > runs/storage_config.json
+
+# Migrate existing PKL files
+python scripts/migrate_pkl_to_hdf5.py --dry-run   # preview
+python scripts/migrate_pkl_to_hdf5.py             # migrate
+```
+
+### Result retention
+
+```bash
+# Keep only the 10 most recent results
+python -m result.retention --keep 10
+
+# Preview without deleting
+python -m result.retention --keep 10 --dry-run
+```
+
+### Ingest pipeline
+
+For programmatic data ingestion (e.g. integrating a new solver):
+
+```python
+from ingest import IngestPipeline
+from ingest.adapters.tfrecord import TFRecordAdapter
+
+adapter  = TFRecordAdapter("data/", domain="cylinder_flow")
+pipeline = IngestPipeline(adapter, out_dir="data/")
+results  = pipeline.run()   # harvest → validate → normalise → write → index
+```
+
+---
+
 ## Project layout
 
 ```
-api/          FastAPI routes (train, rollout, generate, dataset, status)
-app/          React + Tailwind frontend
-model/        GNN architecture (encoder, processor, decoder)
-confidence/   Latent-space KDTree similarity index (C++ + pybind11)
-train.py      Training entry point
-rollout.py    Inference entry point
-generate_ssh.py  Remote GPU generate dispatch
-tests/        pytest test suite
+api/            FastAPI routes (train, rollout, generate, dataset, status)
+app/            React + Tailwind frontend
+model/          GNN architecture (encoder, processor, decoder)
+confidence/     Latent-space KDTree similarity index (C++ + pybind11)
+storage/        Repository Pattern — PKL, HDF5, Zarr backends + StorageFactory
+ingest/         Ingest pipeline — SolverAdapter Protocol, composable stages
+result/         retention.py — result pruning CLI
+scripts/        migrate_pkl_to_hdf5.py, regenerate_dat.py
+train.py        Training entry point
+rollout.py      Inference entry point
+generate_ssh.py Remote GPU generate dispatch
+tests/          pytest test suite (~60+ tests)
 ```

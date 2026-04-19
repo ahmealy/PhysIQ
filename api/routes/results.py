@@ -14,7 +14,11 @@ import matplotlib.tri as mtri
 import numpy as np
 from fastapi import APIRouter, HTTPException
 
+from storage.factory import get_repository
+
 router = APIRouter(prefix="/results")
+
+_repo = get_repository()
 
 RESULT_DIR = "result"
 
@@ -101,11 +105,9 @@ def _file_sort_key(fname: str):
     return datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
 
 def _list_pkl_files() -> list[str]:
-    if not os.path.exists(RESULT_DIR):
-        return []
-    files = [f for f in os.listdir(RESULT_DIR) if f.endswith(".pkl")]
-    files.sort(key=_file_sort_key, reverse=True)
-    return files
+    names = _repo.list()
+    # repo.list() returns stems; re-attach suffix for backward-compat callers
+    return [n + ".pkl" for n in names]
 
 
 def _load_pkl(filename: str):
@@ -363,7 +365,7 @@ def delete_result(filename: str):
         raise HTTPException(400, "Invalid filename")
     if not os.path.exists(path):
         raise HTTPException(404, "File not found: %s" % filename)
-    os.remove(path)
+    _repo.delete(filename)
     _pkl_cache.invalidate_filename(filename)   # drop from cache
     return {"status": "deleted", "filename": filename}
 

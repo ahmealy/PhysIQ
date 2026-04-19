@@ -16,24 +16,26 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from scipy.spatial import cKDTree
 
+from storage.factory import get_repository
+
 router = APIRouter(prefix="/results")
 
 RESULT_DIR = "result"
 _K_NEIGHBORS = 7          # k-nearest (includes self → 6 actual neighbors)
 _CACHE_SIZE   = 32        # number of (filename, t) pairs cached in memory
 
+_repo = get_repository()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_pkl_physics(filename: str):
     """Load pkl and return (predicted [T,N,2], targets [T,N,2], crds [N,2])."""
-    path = os.path.join(RESULT_DIR, filename)
-    if not os.path.exists(path):
+    try:
+        predicted, targets, crds, _meta = _repo.load(filename)
+    except FileNotFoundError:
         raise HTTPException(404, "Result file not found: %s" % filename)
-    with open(path, "rb") as f:
-        data = pickle.load(f)
-    result, crds = data[:2]
-    return result[0], result[1], crds   # predicted, targets, crds
+    return predicted, targets, crds
 
 
 @functools.lru_cache(maxsize=_CACHE_SIZE)

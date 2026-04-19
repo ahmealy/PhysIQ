@@ -35,6 +35,7 @@ docs/*
 !docs/demo/
 !docs/demo/**
 !docs/DATA_PIPELINE_UPGRADE_PLAN.md
+!docs/TECHNICAL_REFERENCE.md
 
 # Dataset metadata
 meta.json

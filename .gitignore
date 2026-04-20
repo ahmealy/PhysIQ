@@ -48,3 +48,4 @@ confidence/build/*
 .worktrees/
 !docs/technical/
 !docs/technical/**
+!docs/INTERVIEW_REFERENCE.md

@@ -50,3 +50,9 @@ confidence/build/*
 !docs/technical/**
 !docs/INTERVIEW_REFERENCE.md
 !docs/DATA_FLOW_DIAGRAM.md
+!docs/CODEBASE_WALKTHROUGH.md
+!docs/SUBSYSTEM_CONFIDENCE.md
+!docs/SUBSYSTEM_PREDICTOR.md
+!docs/SUBSYSTEM_DATA.md
+!docs/SUBSYSTEM_GENERATOR.md
+!docs/SUBSYSTEM_API.md

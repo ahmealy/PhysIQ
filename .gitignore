@@ -49,3 +49,4 @@ confidence/build/*
 !docs/technical/
 !docs/technical/**
 !docs/INTERVIEW_REFERENCE.md
+!docs/DATA_FLOW_DIAGRAM.md

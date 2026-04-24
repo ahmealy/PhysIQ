@@ -35,6 +35,7 @@ The vault is written as a series of *build-up stories*: each note starts from fi
 | [[12_testing_strategy]] | Test pyramid: unit tests for GNN components, integration tests for API routes, end-to-end smoke tests, physics regression tests |
 | [[13_docker_deployment]] | Docker setup: multi-stage frontend build, CPU-only API container, SSH GPU dispatch pattern, nginx SSE configuration, Compose profiles |
 | [[14_design_decisions_tradeoffs]] | Every major architectural decision: alternatives considered, rationale, and explicit costs accepted |
+| [[15_equivariance]] | Is the GNN equivariant? What that means, exactly where it breaks, 3-phase roadmap to add E(2)/E(3) equivariance with e3nn, test to verify |
 
 ---
 
@@ -70,6 +71,9 @@ Use this section when a specific question arises and you need the right note imm
 | "Where does LU decomposition appear in the system?" | [[07_poisson_correction_lu]] |
 | "What is the Poisson pressure correction and why is it opt-in?" | [[07_poisson_correction_lu]] · [[14_design_decisions_tradeoffs#6. Poisson Correction Opt-In vs Always-On]] |
 | "How do you ensure the model produces physically consistent outputs?" | [[07_poisson_correction_lu]] · [[04_gnn_architecture]] |
+| "Is your GNN equivariant?" | [[15_equivariance]] |
+| "How would you add rotational equivariance?" | [[15_equivariance#5. How to Make It Equivariant]] |
+| "What is e3nn and how does it work?" | [[15_equivariance#Option C: Steerable Features with e3nn]] |
 
 ### Inference & Deployment
 

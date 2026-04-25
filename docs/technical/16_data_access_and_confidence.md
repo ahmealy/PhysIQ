@@ -281,6 +281,89 @@ INFERENCE TIME (per prediction):
     return clip(1 - d_min / train_diameter, 0, 1)
 ```
 
+### Is k=5 the right choice? Could you score OOD while still being similar to training data?
+
+This is worth unpacking carefully because **two different k values serve two different roles**:
+
+```python
+# k=6 used for train_diameter (calibration, once at build time)
+dists, _ = self._scipy_tree.query(self.embeddings, k=6)
+train_diameter = np.percentile(dists[:, 5], 95)
+
+# k=1 used for scoring (inference, per request)
+d_min, _ = self._scipy_tree.query(test_embedding, k=1)
+score = clip(1 - d_min / train_diameter, 0, 1)
+```
+
+`train_diameter` is only a **scale reference** — it answers "how big is a typical local neighbourhood in training space?" The actual score is determined entirely by `d_min`, which is distance to your **single nearest** training point.
+
+#### When the concern doesn't apply
+
+If `d_min` is large enough to give score ≈ 0, you are genuinely far from every training point — farther than the typical 5-NN radius. If you were close to any training point, `d_min` would be small and the score would be high, regardless of `train_diameter`.
+
+#### When the concern IS valid — "surrounded but unmatched"
+
+The real vulnerability is a different failure mode:
+
+```
+Test point sits in the middle of a training cluster,
+moderately close to many training points,
+but not very close to any single one.
+
+d_min = 0.7   train_diameter = 0.98
+score = 1 - 0.7/0.98 = 0.29  → flagged as borderline OOD
+
+Reality: 50 training neighbours at distance 0.7–0.9
+         Test point is well inside the training distribution
+```
+
+Using k=1 for `d_min` misses this case. A k-NN **density score** would catch it:
+
+```python
+# average distance to k nearest, not just the closest one
+dists, _ = tree.query(test_embed, k=5)
+density_score = 1 - dists.mean() / train_diameter
+```
+
+#### Is k=5 for train_diameter principled?
+
+No — it's a heuristic from the k-NN classification literature (same reasoning as choosing k=5 for k-NN classifiers: small enough to capture local density, large enough to be stable). Different k values produce very different thresholds:
+
+| k for train_diameter | Effect |
+|---|---|
+| k=1 | `train_diameter` is tiny → nearly everything flags OOD |
+| k=5 | Moderate — reflects "how far until you have 5 similar examples" |
+| k=20 | `train_diameter` grows → threshold looser → harder to flag OOD |
+
+The choice of 5 is not derived from the physics or the embedding geometry. It's a reasonable default.
+
+#### What would be better
+
+Three alternatives, in increasing complexity:
+
+**1. k-NN density score** (most impactful fix — changes the scoring formula):
+```python
+dists, _ = tree.query(test_embed, k=5)
+score = clip(1 - dists.mean() / train_diameter, 0, 1)
+```
+
+**2. Adaptive local threshold** — instead of one global `train_diameter`, use the local 5-NN radius of the nearest training point:
+```python
+# local_5nn_dists[i] = 5th-NN distance for training point i (precomputed at build time)
+nearest_idx = tree.query(test_embed, k=1)[1][0]
+local_diam = local_5nn_dists[nearest_idx]
+score = clip(1 - d_min / local_diam, 0, 1)
+```
+Dense clusters get a tight threshold; sparse regions get a looser one.
+
+**3. Tune k at build time** — use a held-out validation set with known-good and known-OOD examples, sweep k ∈ {1, 5, 10, 20}, pick the k that best separates them by AUROC. If FAISS is active (≥100k trajectories), k=20 queries are essentially free.
+
+#### Current limitation summary
+
+The k=5 choice for `train_diameter` is reasonable. The more significant design limitation is using k=1 for `d_min` at scoring time — that's what misses "surrounded but unmatched" test points. If users report low confidence on clearly reasonable inputs, the first fix to try is switching from k=1 to a k-NN density score.
+
+---
+
 ### Stale index detection
 
 `train_diameter` is computed FROM a specific set of model weights (the encoder that produced the embeddings). If the model is retrained, the embedding space changes — the old `train_diameter` is meaningless. This is why the index stores a SHA-256 hash of the checkpoint:

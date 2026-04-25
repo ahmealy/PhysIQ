@@ -281,6 +281,97 @@ INFLOW and WALL_BOUNDARY nodes have prescribed velocities — they don't evolve 
 
 ---
 
+## Cloth Graph Construction — `FlagSimulator._build_graph()`
+
+For cloth, **no separate transform is applied before training**. The dataset returns a face-based graph with no edges. The entire graph — edges and edge features — is built from scratch inside `forward()` on every single call.
+
+### What FlagDataset returns (no edges yet)
+
+```
+graph.x         [N, 4]   world_pos_t[3] + node_type[1]    ← storage only, not final GNN input
+graph.prev_x    [N, 3]   world_pos_{t-1}
+graph.pos       [N, 2]   mesh_pos  (2D rest UV, static)
+graph.world_pos [N, 3]   world_pos_t  (3D deformed position)
+graph.face      [3, F]   triangle connectivity
+graph.y         [N, 3]   world_pos_{t+1}  (regression target)
+
+edge_index  — MISSING
+edge_attr   — MISSING
+```
+
+### `_build_graph()` — called at the top of every `forward()`
+
+```mermaid
+flowchart TD
+    FACE["graph.face  [3, F]\ntriangle indices"]
+
+    FTE["PyG FaceToEdge\nface [3,F] → edge_index [2,E]\nbidirectional: each triangle → 6 directed edges"]
+
+    RW["rel_world = world_pos[senders] - world_pos[receivers]\n[E, 3]  deformed 3D space\n↑ changes every timestep as cloth deforms"]
+
+    WN["world_norm = ‖rel_world‖\n[E, 1]"]
+
+    RM["rel_mesh = mesh_pos[senders] - mesh_pos[receivers]\n[E, 2]  rest UV space\n↑ static — same every timestep"]
+
+    MN["mesh_norm = ‖rel_mesh‖\n[E, 1]"]
+
+    EA["edge_attr = cat(rel_world, world_norm, rel_mesh, mesh_norm)\n[E, 7]"]
+
+    FACE --> FTE --> RW & RM
+    RW --> WN
+    RM --> MN
+    WN & MN & RW & RM --> EA
+```
+
+### Then `_build_node_features()` replaces `graph.x`
+
+The `graph.x` coming from the dataset (`world_pos_t + node_type`, [N,4]) is just a carrier — it's not the actual GNN input. Inside `forward()`, it gets discarded and replaced:
+
+```
+# Extract node_type from graph.x col 3 BEFORE it gets overwritten
+node_type_col = graph.x[:, 3:4].squeeze(-1).long()   # [N]
+
+velocity  = world_pos - prev_x                        # [N, 3]  position diff each step
+one_hot   = F.one_hot(node_type_col, num_classes=9)   # [N, 9]
+node_feats = cat([velocity, one_hot])                 # [N, 12]
+
+graph.x = node_normalizer(node_feats)                 # overwrite: [N, 4] → [N, 12]
+```
+
+### Full cloth `forward()` sequence
+
+```mermaid
+sequenceDiagram
+    participant DS as FlagDataset
+    participant FS as FlagSimulator.forward()
+    participant BG as _build_graph()
+    participant BN as _build_node_features()
+    participant GNN as EncoderProcesserDecoder
+
+    DS->>FS: Data(x=[N,4], prev_x=[N,3], pos=[N,2],\nworld_pos=[N,3], face=[3,F], y=[N,3])
+    FS->>BG: graph (no edges)
+    BG->>BG: FaceToEdge → edge_index [2,E]
+    BG->>BG: rel_world [E,3]  world_norm [E,1]
+    BG->>BG: rel_mesh  [E,2]  mesh_norm  [E,1]
+    BG-->>FS: graph + edge_index [2,E] + edge_attr [E,7]
+    FS->>BN: graph.world_pos, graph.prev_x, node_type
+    BN-->>FS: node_feats [N,12] = velocity[3] + one_hot[9]
+    FS->>FS: graph.x = node_normalizer(node_feats)
+    FS->>FS: graph.edge_attr = edge_normalizer(edge_attr)
+    FS->>GNN: graph (x=[N,12], edge_index=[2,E], edge_attr=[E,7])
+    GNN-->>FS: predicted_acc [N,3]
+    FS->>FS: Verlet: pos_next = 2·world_pos - prev_x + acc
+    FS->>FS: pin HANDLE nodes to world_pos
+```
+
+### Why edges must be rebuilt every step
+
+`rel_world` depends on `world_pos` — the 3D position of every cloth node at the current timestep. As the flag flaps, every node moves, so every edge vector changes. If you pre-computed edge features once (like CFD does), you'd have the wrong geometry for steps 1–599.
+
+`rel_mesh` is actually static (rest-pose UV never changes), but it's computed here anyway — it costs one subtraction and keeps the code in one place.
+
+---
+
 ## CFD vs Cloth — Side-by-Side
 
 ```mermaid
@@ -289,7 +380,7 @@ flowchart LR
         C1["TFRecord fields:\nmesh_pos[T,N,2]  velocity[T,N,2]\nnode_type[T,N,1]  cells[T,C,3]"]
         C2["Node features [N,3]:\nnode_type · vx · vy"]
         C3["Edge features [E,3]:\nΔx · Δy · ‖edge‖"]
-        C4["Edges built by:\nPyG T.FaceToEdge + Cartesian + Distance\n(outside forward, static)"]
+        C4["Edges built by:\nPyG T.FaceToEdge + Cartesian + Distance\napplied in train loop BEFORE forward()\nresult is static — same every step"]
         C5["Target: Δvelocity [N,2]\nintegration: Euler\nv_t+1 = v_t + Δv"]
         C1 --> C2 --> C3 --> C4 --> C5
     end
@@ -298,7 +389,7 @@ flowchart LR
         F1["TFRecord fields:\nmesh_pos[T,N,2]  world_pos[T,N,3]\nnode_type[T,N,1]  cells[T,C,3]"]
         F2["Node features [N,12]:\nworld_pos_t - world_pos_t-1  [N,3]\none_hot(node_type, 9)  [N,9]"]
         F3["Edge features [E,5]:\nrel_world[3]=world_pos_s - world_pos_r\nrel_mesh[2]=mesh_pos_s - mesh_pos_r"]
-        F4["Edges built by:\nFlagSimulator.forward()\n(inside forward, rel_world changes each step)"]
+        F4["Edges built by:\nFlagSimulator._build_graph()\ncalled at top of EVERY forward()\nrel_world recomputed each step from current world_pos"]
         F5["Target: acceleration [N,3]\nintegration: Verlet\npos_t+1 = 2·pos_t - pos_t-1 + acc"]
         F1 --> F2 --> F3 --> F4 --> F5
     end

@@ -38,6 +38,7 @@ The vault is written as a series of *build-up stories*: each note starts from fi
 | [[15_equivariance]] | Is the GNN equivariant? What that means, exactly where it breaks, 3-phase roadmap to add E(2)/E(3) equivariance with e3nn, test to verify |
 | [[16_data_access_and_confidence]] | How `.dat` + `.npz` gives O(1) random access (memmap mechanics, byte-offset arithmetic), why HDF5 is wrong for training, and exactly how `train_diameter` is computed and used in confidence scoring |
 | [[17_tfrecord_to_graph_pipeline]] | Full pipeline from raw TFRecord to GNN training: TFRecord fields, parse_tfrecord.py flatten, FpcDataset O(1) access, PyG transformer (FaceToEdge → Cartesian → Distance), Simulator.forward normalise/encode/process/decode — with tensor shapes at every stage and CFD vs cloth side-by-side |
+| [[18_inverse_design_pipeline]] | Inverse design end-to-end: how cx/cy/r/v_inlet are extracted, CVAE encoder/decoder architecture, CVAE training loss (recon + KL + physics consistency), Latin Hypercube Sampling, RealMeshLookup snapping, K=5 BPTT gradient refinement, ParamSpaceOOD vs NearestNeighborIndex — all with Mermaid diagrams |
 
 ---
 

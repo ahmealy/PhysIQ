@@ -36,6 +36,7 @@ The vault is written as a series of *build-up stories*: each note starts from fi
 | [[13_docker_deployment]] | Docker setup: multi-stage frontend build, CPU-only API container, SSH GPU dispatch pattern, nginx SSE configuration, Compose profiles |
 | [[14_design_decisions_tradeoffs]] | Every major architectural decision: alternatives considered, rationale, and explicit costs accepted |
 | [[15_equivariance]] | Is the GNN equivariant? What that means, exactly where it breaks, 3-phase roadmap to add E(2)/E(3) equivariance with e3nn, test to verify |
+| [[16_data_access_and_confidence]] | How `.dat` + `.npz` gives O(1) random access (memmap mechanics, byte-offset arithmetic), why HDF5 is wrong for training, and exactly how `train_diameter` is computed and used in confidence scoring |
 
 ---
 

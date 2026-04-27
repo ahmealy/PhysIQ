@@ -40,6 +40,7 @@ The vault is written as a series of *build-up stories*: each note starts from fi
 | [[17_tfrecord_to_graph_pipeline]] | Full pipeline from raw TFRecord to GNN training: TFRecord fields, parse_tfrecord.py flatten, FpcDataset O(1) access, PyG transformer (FaceToEdge → Cartesian → Distance), Simulator.forward normalise/encode/process/decode — with tensor shapes at every stage and CFD vs cloth side-by-side |
 | [[18_inverse_design_pipeline]] | Inverse design end-to-end: how cx/cy/r/v_inlet are extracted, CVAE encoder/decoder architecture, CVAE training loss (recon + KL + physics consistency), Latin Hypercube Sampling, RealMeshLookup snapping, K=5 BPTT gradient refinement, ParamSpaceOOD vs NearestNeighborIndex — all with Mermaid diagrams |
 | [[19_generate_full_flow]] | Full flow from user clicking Generate to candidates in browser: sample path (LHS → CVAE decode → mesh → surrogate → OOD → SSE stream) and gradient path (Adam in latent space → why GNN gradient is disabled → surrogate chain → diverse candidates around best_z*) with all SSE events explained |
+| [[20_inverse_design_backprop]] | The full differentiable path for both domains: CFD (z → CVAE decoder → DragSurrogate MLP → loss, _use_gnn=False, why discrete KDTree kills cx/cy/r gradient) vs Cloth (z → CVAE decoder → PCA⁻¹ → 5×GNN BPTT → stress → loss), tensor shapes at every step, why prev_x must not be detached |
 
 ---
 

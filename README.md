@@ -205,6 +205,14 @@ All three use k-NN (k=6) least-squares gradient estimation on the unstructured m
 
 ---
 
+## Results
+
+| Cylinder flow — trajectory 0 | Cylinder flow — trajectory 1 |
+|---|---|
+| ![Demo 0](videos/0.gif) | ![Demo 1](videos/1.gif) |
+
+---
+
 ## Data pipeline
 
 ### Parse & train (first time setup)

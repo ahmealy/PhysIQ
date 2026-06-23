@@ -6,12 +6,6 @@ PhysIQ is a full-stack platform built on Graph Neural Networks (GNNs) that repla
 
 ---
 
-## Demo
-
-[![PhysIQ Demo](https://img.youtube.com/vi/Ke9_Fz0Nj8M/maxresdefault.jpg)](https://www.youtube.com/watch?v=Ke9_Fz0Nj8M)
-
----
-
 ## What it does
 
 | Capability | Description |
@@ -22,6 +16,12 @@ PhysIQ is a full-stack platform built on Graph Neural Networks (GNNs) that repla
 | **Visualise** | Animated mesh viewer, per-step RMSE, physics diagnostics (vorticity, energy conservation, divergence), 3D cloth viewer |
 | **Dataset Studio** | Field distributions, outlier detection, node type breakdown, mesh quality metrics |
 | **Training Similarity** | Latent-space KDTree score — tells you how close a new mesh is to the training distribution before you trust the prediction |
+
+---
+
+## Demo
+
+[![PhysIQ Demo](https://img.youtube.com/vi/Ke9_Fz0Nj8M/maxresdefault.jpg)](https://www.youtube.com/watch?v=Ke9_Fz0Nj8M)
 
 ---
 
@@ -202,14 +202,6 @@ After a rollout, the following diagnostics are computed and shown alongside the 
 | **Divergence proxy** | `mean |∂vx/∂x + ∂vy/∂y|` | Incompressibility violation — should be ≈ 0 for physical flow |
 
 All three use k-NN (k=6) least-squares gradient estimation on the unstructured mesh — no structured grid required.
-
----
-
-## Results
-
-| Cylinder flow — trajectory 0 | Cylinder flow — trajectory 1 |
-|---|---|
-| ![Demo 0](videos/0.gif) | ![Demo 1](videos/1.gif) |
 
 ---
 

@@ -199,6 +199,10 @@ All three use k-NN (k=6) least-squares gradient estimation on the unstructured m
 
 ---
 
+## Demo
+
+[![PhysIQ Demo](https://img.youtube.com/vi/Ke9_Fz0Nj8M/maxresdefault.jpg)](https://www.youtube.com/watch?v=Ke9_Fz0Nj8M)
+
 ## Results
 
 | Cylinder flow — trajectory 0 | Cylinder flow — trajectory 1 |

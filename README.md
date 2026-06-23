@@ -6,6 +6,12 @@ PhysIQ is a full-stack platform built on Graph Neural Networks (GNNs) that repla
 
 ---
 
+## Demo
+
+[![PhysIQ Demo](https://img.youtube.com/vi/Ke9_Fz0Nj8M/maxresdefault.jpg)](https://www.youtube.com/watch?v=Ke9_Fz0Nj8M)
+
+---
+
 ## What it does
 
 | Capability | Description |
@@ -198,10 +204,6 @@ After a rollout, the following diagnostics are computed and shown alongside the 
 All three use k-NN (k=6) least-squares gradient estimation on the unstructured mesh — no structured grid required.
 
 ---
-
-## Demo
-
-[![PhysIQ Demo](https://img.youtube.com/vi/Ke9_Fz0Nj8M/maxresdefault.jpg)](https://www.youtube.com/watch?v=Ke9_Fz0Nj8M)
 
 ## Results
 
